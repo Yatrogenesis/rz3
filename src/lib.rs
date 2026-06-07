@@ -346,7 +346,6 @@ impl Rz3Solver {
                 let array_lemmas = self.array.generate_lemmas();
                 let quant_lemmas = self.quant.generate_lemmas(&mut self.euf, &model);
                 let string_lemmas = self.string.generate_lemmas();
-                
                 if array_lemmas.is_empty() && quant_lemmas.is_empty() && string_lemmas.is_empty() {
                     return SolverResult::Sat;
                 } else {

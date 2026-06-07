@@ -30,17 +30,16 @@ impl StringSolver {
     fn collect_terms(&mut self, expr: &Expr) {
         match expr {
             Expr::StrLen(s) => {
+                // Recolectar SIEMPRE; el dedup se hace al EMITIR (generate_lemmas),
+                // no aquí. Si se dedup aquí, el assert inicial (assert_no_track ->
+                // string.assert) pre-instancia el axioma y el loop nunca lo emite al SAT.
                 let axiom = Expr::Ge(Box::new(Expr::StrLen(s.clone())), Box::new(Expr::Int(0)));
-                if self.instantiated_axioms.insert(axiom.clone()) {
-                    self.pending_lemmas.push(axiom);
-                }
+                self.pending_lemmas.push(axiom);
                 self.collect_terms(s);
             }
             Expr::StrConst(s) => {
                 let axiom = Expr::Eq(Box::new(Expr::StrLen(Box::new(expr.clone()))), Box::new(Expr::Int(s.len() as i64)));
-                if self.instantiated_axioms.insert(axiom.clone()) {
-                    self.pending_lemmas.push(axiom);
-                }
+                self.pending_lemmas.push(axiom);
             }
             Expr::StrConcat(args) => {
                 for arg in args { self.collect_terms(arg); }
@@ -62,9 +61,15 @@ impl StringSolver {
     }
 
     pub fn generate_lemmas(&mut self) -> Vec<Expr> {
-        let res = self.pending_lemmas.clone();
-        self.pending_lemmas.clear();
-        res
+        // Dedup en el momento de EMISIÓN: solo lemas aún no enviados al SAT core.
+        // Evita re-emitir (loop infinito) y permite emitir los recolectados en este round.
+        let mut out = Vec::new();
+        for axiom in std::mem::take(&mut self.pending_lemmas) {
+            if self.instantiated_axioms.insert(axiom.clone()) {
+                out.push(axiom);
+            }
+        }
+        out
     }
 }
 
