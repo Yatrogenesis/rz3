@@ -18,6 +18,17 @@ pub struct Bound {
 //      Validado contra: Benchmarks QF_LRA de SMT-LIB.
 type Disequality = (BTreeMap<usize, Ratio<i64>>, Ratio<i64>, Expr);
 
+/// Resultado de un intento de reparación de desigualdad (model-repair LRA).
+enum RepairResult {
+    /// Se movió una var (exacto, dentro de la región factible) rompiendo la igualdad.
+    Moved,
+    /// Ninguna var no-básica puede moverse en ninguna dirección: el politopo es un
+    /// único punto -> la suma está forzada == target -> conflicto genuino (Unsat).
+    FrozenPolytope,
+    /// No se pudo romper, pero el politopo no es un punto -> no provablemente unsat -> Unknown.
+    Stuck,
+}
+
 pub struct LraSolver {
     /// Mapeo de nombres de variables a IDs internos
     var_map: BTreeMap<String, usize>,
@@ -42,6 +53,8 @@ pub struct LraSolver {
     last_conflict_var: Option<usize>,
     /// Conflicto de desigualdad
     disequality_conflict: Option<Expr>,
+    /// Orígenes de las cotas que congelan las vars de la desigualdad en conflicto genuino
+    disequality_freeze_origins: Vec<Expr>,
     /// Pivot limit exceeded — result is Unknown, not Unsat
     is_unknown: bool,
 }
@@ -67,6 +80,7 @@ impl LraSolver {
             disequalities: Vec::new(),
             last_conflict_var: None,
             disequality_conflict: None,
+            disequality_freeze_origins: Vec::new(),
             is_unknown: false,
         }
     }
@@ -84,6 +98,7 @@ impl LraSolver {
         self.disequalities.clear();
         self.last_conflict_var = None;
         self.disequality_conflict = None;
+        self.disequality_freeze_origins.clear();
         self.is_unknown = false;
     }
 
@@ -170,6 +185,8 @@ impl LraSolver {
     pub fn check_feasibility(&mut self) -> bool {
         let mut pivots = 0;
         let max_pivots = 2000;
+        let mut diseq_repairs = 0usize;
+        let max_diseq_repairs = 2000usize;
 
         loop {
             if pivots > max_pivots {
@@ -245,21 +262,124 @@ impl LraSolver {
                     return false; 
                 }
             } else {
-                // Feasible with respect to bounds. Now check disequalities.
-                for (coeffs, target, origin) in &self.disequalities {
-                    let mut current_sum = Ratio::new(0, 1);
+                // Factible respecto a cotas. Revisar desigualdades (≠).
+                // En violación: model-repair SOUND y acotado (perturbar una var NO
+                // básica por un racional EXACTO dentro de sus cotas). Si no hay
+                // reparación y la suma es provablemente constante (todas las vars
+                // pinned lb==ub) -> conflicto genuino (Unsat). Si no es provable o se
+                // agota el presupuesto -> Unknown (sound). [Dutertre-deMoura + advisor].
+                let zero = Ratio::new(0, 1);
+                let mut violated_idx = None;
+                for (idx, (coeffs, target, _)) in self.disequalities.iter().enumerate() {
+                    let mut current_sum = zero;
                     for (&var, &coeff) in coeffs {
-                        current_sum += coeff * self.assignment.get(&var).unwrap_or(&Ratio::new(0, 1));
+                        current_sum += coeff * self.assignment.get(&var).unwrap_or(&zero);
                     }
-                    if current_sum == *target {
-                        // Por ahora, si hay violación, fallamos. 
-                        // Idealmente intentaríamos mover una variable no básica.
-                        self.disequality_conflict = Some(origin.clone());
-                        return false;
+                    if current_sum == *target { violated_idx = Some(idx); break; }
+                }
+                match violated_idx {
+                    None => return true,
+                    Some(idx) => {
+                        diseq_repairs += 1;
+                        if diseq_repairs > max_diseq_repairs {
+                            self.is_unknown = true;
+                            return true; // Unknown (sound)
+                        }
+                        match self.try_repair_disequality(idx) {
+                            RepairResult::Moved => continue, // re-escanear cotas + desigualdades
+                            RepairResult::FrozenPolytope => {
+                                // Único punto factible: la suma está forzada == target -> Unsat genuino.
+                                self.disequality_conflict = Some(self.disequalities[idx].2.clone());
+                                self.collect_freeze_origins(idx);
+                                return false;
+                            }
+                            RepairResult::Stuck => {
+                                // No reparable, pero el politopo no es un punto -> Unknown (sound).
+                                self.is_unknown = true;
+                                return true;
+                            }
+                        }
                     }
                 }
-                return true;
             }
+        }
+    }
+
+    /// Máximo movimiento factible (exacto) de la var no-básica `x_j` hacia arriba y
+    /// hacia abajo, manteniendo TODAS las vars básicas dentro de sus cotas (ratio test
+    /// de Simplex). `None` = sin cota (∞). Asume la asignación actual factible (room>=0).
+    fn feasible_room(&self, x_j: usize) -> (Option<Ratio<i64>>, Option<Ratio<i64>>) {
+        let zero = Ratio::new(0, 1);
+        let val_j = *self.assignment.get(&x_j).unwrap_or(&zero);
+        let mut up: Option<Ratio<i64>> = self.upper_bounds.get(&x_j).map(|b| b.val - val_j);
+        let mut down: Option<Ratio<i64>> = self.lower_bounds.get(&x_j).map(|b| val_j - b.val);
+        for (&x_i, row) in self.tableau.iter() {
+            let a_ij = match row.get(&x_j) { Some(&a) if a != zero => a, _ => continue };
+            let val_i = *self.assignment.get(&x_i).unwrap_or(&zero);
+            // Subir x_j por Δ mueve x_i por a_ij*Δ.
+            if a_ij > zero {
+                if let Some(ub) = self.upper_bounds.get(&x_i) { let c = (ub.val - val_i) / a_ij; up = Some(up.map_or(c, |u| u.min(c))); }
+                if let Some(lb) = self.lower_bounds.get(&x_i) { let c = (val_i - lb.val) / a_ij; down = Some(down.map_or(c, |d| d.min(c))); }
+            } else {
+                let neg = -a_ij;
+                if let Some(lb) = self.lower_bounds.get(&x_i) { let c = (val_i - lb.val) / neg; up = Some(up.map_or(c, |u| u.min(c))); }
+                if let Some(ub) = self.upper_bounds.get(&x_i) { let c = (ub.val - val_i) / neg; down = Some(down.map_or(c, |d| d.min(c))); }
+            }
+        }
+        (up, down)
+    }
+
+    /// Repara la desigualdad violada `idx`: mueve (exacto) una var no-básica con efecto
+    /// no nulo sobre la suma, dentro de la región factible (ratio test). Determinista
+    /// (por índice). Si ninguna var puede moverse en ninguna dirección -> politopo = punto.
+    fn try_repair_disequality(&mut self, idx: usize) -> RepairResult {
+        let coeffs = self.disequalities[idx].0.clone();
+        let zero = Ratio::new(0, 1);
+        let one = Ratio::new(1, 1);
+        let mut nb = self.non_basic_vars.clone();
+        nb.sort_unstable();
+        let mut any_can_move = false;
+        let mut mover: Option<(usize, Ratio<i64>)> = None;
+        for &x_j in &nb {
+            let (up, down) = self.feasible_room(x_j);
+            let can_up = up.map_or(true, |r| r > zero);
+            let can_down = down.map_or(true, |r| r > zero);
+            if can_up || can_down { any_can_move = true; }
+            if mover.is_none() {
+                // r_j = d(sum)/d(x_j): coef propio + Σ_{v básica en coeffs} coef_v * tableau[v][x_j]
+                let mut r_j = coeffs.get(&x_j).copied().unwrap_or(zero);
+                for (&v, &c_v) in &coeffs {
+                    if let Some(row) = self.tableau.get(&v) {
+                        if let Some(&a_vj) = row.get(&x_j) { r_j += c_v * a_vj; }
+                    }
+                }
+                if r_j != zero {
+                    // Cualquier Δ≠0 factible rompe la igualdad (r_j≠0). Paso exacto acotado.
+                    let delta = if can_up {
+                        match up { Some(r) => r.min(one), None => one }
+                    } else if can_down {
+                        match down { Some(r) => -(r.min(one)), None => -one }
+                    } else { zero };
+                    if delta != zero { mover = Some((x_j, delta)); }
+                }
+            }
+        }
+        if let Some((x_j, delta)) = mover {
+            let val_j = *self.assignment.get(&x_j).unwrap_or(&zero);
+            self.update(x_j, val_j + delta);
+            return RepairResult::Moved;
+        }
+        if any_can_move { RepairResult::Stuck } else { RepairResult::FrozenPolytope }
+    }
+
+    /// Guarda los orígenes de las cotas que congelan las variables de la desigualdad
+    /// en conflicto, para una explicación completa al SAT core.
+    fn collect_freeze_origins(&mut self, idx: usize) {
+        self.disequality_freeze_origins.clear();
+        let vars: Vec<usize> = self.disequalities[idx].0.keys().copied().collect();
+        for v in vars {
+            if let Some(e) = self.bound_origins.get(&(v, true)) { self.disequality_freeze_origins.push(e.clone()); }
+            if let Some(e) = self.bound_origins.get(&(v, false)) { self.disequality_freeze_origins.push(e.clone()); }
         }
     }
 }
@@ -293,7 +413,11 @@ impl TheorySolver for LraSolver {
 
     fn explain(&self) -> Vec<Expr> {
         if let Some(origin) = &self.disequality_conflict {
-            return vec![origin.clone()];
+            // Origen de la desigualdad + las cotas que congelan sus variables,
+            // para que el SAT core aprenda una cláusula útil (no una trivial).
+            let mut out = vec![origin.clone()];
+            out.extend(self.disequality_freeze_origins.iter().cloned());
+            return out;
         }
 
         let mut conflict = Vec::new();
