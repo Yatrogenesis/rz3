@@ -1,0 +1,18 @@
+[package]
+name = "rz3"
+version = "0.1.0"
+edition = "2021"
+description = "100% Rust SMT Solver - Z3 Replacement"
+
+[[bin]]
+name = "rz3"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+num-rational = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+sha2 = "0.10"

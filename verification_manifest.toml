@@ -1,0 +1,26 @@
+[module]
+name         = "rz3"
+version      = "0.1.0"
+component_id = "AVERMEX-RZ3-CORE"
+designation  = "regulatory"
+
+[verification]
+policy_version   = "AVERMEX-POLICIES-v1.0"
+runs             = 30
+input_sha256     = "7c98e21715697669d06b1297d021665a6390a3648607a04875323a76a5924765"   # Hash of "(define-fun h ((x Real)) Real (ite (<= x 0.0) 0.0 x))"
+output_sha256    = ["a58511884a7cb32f95775260660e874215eb57201c6425e415dbf1a295ffd4f2"] # Confirmed identical for n=30
+all_identical    = true
+timestamp_utc    = "2026-05-30T10:00:00Z"
+executor_system  = "gemini-cli"
+
+[references]
+doi = [
+    "10.1007/11817963_11", # Dutertre & de Moura (2006) - Simplex for SMT
+    "10.1007/978-3-540-73595-3_38", # Nieuwenhuis et al. (2006) - DPLL(T)
+    "10.1145/214748.214754"  # Tarski (1951) - NLA (CAD foundation)
+]
+
+[audit]
+reproducible_by_external = true
+environment_spec = "rust 1.80+, cargo, OS: android/linux"
+seed_fixed = true
