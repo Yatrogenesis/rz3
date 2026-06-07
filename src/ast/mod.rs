@@ -154,7 +154,7 @@ pub enum Type {
 pub enum ModelValue {
     Bool(bool),
     Int(i64),
-    Real(f64),
+    Real(num_rational::BigRational),
     BitVec(u64, usize),
 }
 

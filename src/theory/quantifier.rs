@@ -1,4 +1,7 @@
 use crate::ast::{Expr, Type, ModelValue};
+use num_rational::BigRational;
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use crate::theory::TheorySolver;
 use crate::theory::euf::{EufSolver, Node};
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,7 +128,7 @@ impl QuantifierSolver {
             Expr::Var(name, _) => model.get(name).cloned(),
             Expr::Bool(b) => Some(ModelValue::Bool(*b)),
             Expr::Int(i) => Some(ModelValue::Int(*i)),
-            Expr::Real(i, s) => Some(ModelValue::Real(*i as f64 / 10i64.pow(*s) as f64)),
+            Expr::Real(i, s) => Some(ModelValue::Real(BigRational::new(BigInt::from(*i), BigInt::from(10i64.pow(*s))))),
             Expr::And(args) => {
                 let mut res = true;
                 for arg in args {
@@ -145,7 +148,7 @@ impl QuantifierSolver {
                 let eb = self.evaluate_expr(b, model);
                 match (ea, eb) {
                     (Some(ModelValue::Int(va)), Some(ModelValue::Int(vb))) => Some(ModelValue::Bool(va == vb)),
-                    (Some(ModelValue::Real(va)), Some(ModelValue::Real(vb))) => Some(ModelValue::Bool((va - vb).abs() < 1e-6)),
+                    (Some(ModelValue::Real(va)), Some(ModelValue::Real(vb))) => Some(ModelValue::Bool(va == vb)),
                     _ => None
                 }
             }
@@ -158,7 +161,7 @@ impl QuantifierSolver {
         match (val, ty) {
             (ModelValue::Bool(b), _) => Expr::Bool(*b),
             (ModelValue::Int(i), _) => Expr::Int(*i),
-            (ModelValue::Real(r), _) => Expr::Real(*r as i64, 0),
+            (ModelValue::Real(r), _) => Expr::Real(r.to_integer().to_i64().unwrap_or(0), 0),
             _ => Expr::Bool(true),
         }
     }

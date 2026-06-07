@@ -10,6 +10,7 @@ use crate::theory::{LraSolver, EufSolver, TheorySolver, ArraySolver, QuantifierS
 use crate::tactic::{Simplifier, TacticEngine, SolveEqs};
 use std::collections::BTreeMap;
 use crate::ast::{Expr, Type, ModelValue};
+use num_traits::ToPrimitive;
 
 pub enum SolverResult {
     Sat,
@@ -172,7 +173,7 @@ impl Rz3Solver {
         for (name, val) in self.lra.get_all_assignments() {
             model.entry(name.clone()).or_insert_with(|| {
                 match self.symbol_table.get(&name) {
-                    Some(crate::ast::Type::Int) => ModelValue::Int(val as i64),
+                    Some(crate::ast::Type::Int) => ModelValue::Int(val.to_integer().to_i64().unwrap_or(0)),
                     _ => ModelValue::Real(val),
                 }
             });

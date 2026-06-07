@@ -1,7 +1,8 @@
 use crate::ast::{Expr, ModelValue, Type};
 use std::collections::BTreeMap;
 use crate::theory::TheorySolver;
-use num_rational::Ratio;
+use num_rational::{Ratio, BigRational};
+use num_bigint::BigInt;
 
 #[derive(Debug, Clone)]
 pub struct Bound {
@@ -91,12 +92,13 @@ impl LraSolver {
     }
 
     /// Returns user-declared variable assignments for model extraction.
-    pub fn get_all_assignments(&self) -> Vec<(String, f64)> {
+    pub fn get_all_assignments(&self) -> Vec<(String, BigRational)> {
         self.var_map.iter()
             .filter_map(|(name, &id)| {
                 self.assignment.get(&id).map(|ratio| {
-                    let f = *ratio.numer() as f64 / *ratio.denom() as f64;
-                    (name.clone(), f)
+                    // Conversión exacta Ratio<i64> -> BigRational (sin pérdida, sin f64).
+                    let r = BigRational::new(BigInt::from(*ratio.numer()), BigInt::from(*ratio.denom()));
+                    (name.clone(), r)
                 })
             })
             .collect()
@@ -322,7 +324,7 @@ impl TheorySolver for LraSolver {
         if let Expr::Var(name, Type::Real) = expr {
             if let Some(&id) = self.var_map.get(name) {
                 if let Some(val) = self.assignment.get(&id) {
-                    return Some(ModelValue::Real(val.to_integer() as f64)); // Simplificación: convertir a f64
+                    return Some(ModelValue::Real(BigRational::new(BigInt::from(*val.numer()), BigInt::from(*val.denom())))); // exacto
                 }
             }
         }
