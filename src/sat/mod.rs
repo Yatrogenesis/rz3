@@ -58,7 +58,14 @@ pub enum Assignment { True, False, Unassigned }
 struct Activity { score: f64, var: usize }
 impl Eq for Activity {}
 impl Ord for Activity {
-    fn cmp(&self, other: &Self) -> Ordering { self.score.partial_cmp(&other.score).unwrap_or(Ordering::Equal) }
+    // Determinismo explícito: en empate de score, desempatar por índice de variable
+    // (orden total), sin depender de la estructura interna del heap. [Fase 3]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| self.var.cmp(&other.var))
+    }
 }
 impl PartialOrd for Activity {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
