@@ -7,9 +7,10 @@
 
 use num_bigint::BigUint;
 use num_rational::BigRational;
+use serde::{Deserialize, Serialize};
 
 /// Modos de redondeo IEEE-754.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RoundingMode {
     NearestTiesToEven,
     TowardZero,
@@ -18,7 +19,7 @@ pub enum RoundingMode {
 }
 
 /// Formato del float: anchura de exponente y de significando.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FloatSort {
     pub exponent_bits: u16,
     pub significand_bits: u16,

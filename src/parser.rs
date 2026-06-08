@@ -115,7 +115,7 @@ fn is_symbol_char(c: char) -> bool {
     c.is_alphabetic() || "~!@$%^&*_-+=<>.?/".contains(c)
 }
 
-use crate::ast::{Expr, Type};
+use crate::ast::{fp::FloatSort, Expr, Type};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -174,6 +174,17 @@ impl<'a> Parser<'a> {
                                     self.next_token(); // RParen
                                     self.next_token(); // RParen
                                     return Some(Type::BitVec(w as usize));
+                                }
+                            } else if op_s == "FloatingPoint" {
+                                if let (Some(Token::Int(ebits)), Some(Token::Int(sbits))) =
+                                    (self.next_token(), self.next_token())
+                                {
+                                    self.next_token(); // RParen
+                                    self.next_token(); // RParen
+                                    return Some(Type::Float(FloatSort {
+                                        exponent_bits: ebits as u16,
+                                        significand_bits: sbits as u16,
+                                    }));
                                 }
                             }
                         }

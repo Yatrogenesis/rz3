@@ -227,8 +227,10 @@ impl LraSolver {
                 let epsilon = Ratio::new(1, 1000000);
                 let target_val = if is_lower { 
                     if self.lower_bounds[&x_i].is_strict { self.lower_bounds[&x_i].val + epsilon } else { self.lower_bounds[&x_i].val }
-                } else { 
-                    if self.upper_bounds[&x_i].is_strict { self.upper_bounds[&x_i].val - epsilon } else { self.upper_bounds[&x_i].val }
+                } else if self.upper_bounds[&x_i].is_strict {
+                    self.upper_bounds[&x_i].val - epsilon
+                } else {
+                    self.upper_bounds[&x_i].val
                 };
 
                 for &x_j in &non_basic_vars {
@@ -342,8 +344,8 @@ impl LraSolver {
         let mut mover: Option<(usize, Ratio<i64>)> = None;
         for &x_j in &nb {
             let (up, down) = self.feasible_room(x_j);
-            let can_up = up.map_or(true, |r| r > zero);
-            let can_down = down.map_or(true, |r| r > zero);
+            let can_up = up.is_none_or(|r| r > zero);
+            let can_down = down.is_none_or(|r| r > zero);
             if can_up || can_down { any_can_move = true; }
             if mover.is_none() {
                 // r_j = d(sum)/d(x_j): coef propio + Σ_{v básica en coeffs} coef_v * tableau[v][x_j]

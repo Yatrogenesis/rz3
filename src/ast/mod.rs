@@ -40,7 +40,28 @@ impl Expr {
             
             Expr::StrConst(_) | Expr::StrConcat(_) => Type::String,
             
-            Expr::App(_, _) => Type::Int, // Simplificación: asumir Int por ahora o usar symbol table
+            Expr::App(name, args) if name == "fp" => match args.as_slice() {
+                [Expr::BvConst(_, 1), Expr::BvConst(_, ebits), Expr::BvConst(_, sig_bits)] => {
+                    Type::Float(fp::FloatSort {
+                        exponent_bits: *ebits as u16,
+                        significand_bits: (*sig_bits + 1) as u16,
+                    })
+                }
+                _ => Type::Int,
+            },
+            Expr::App(name, args) if name.starts_with("fp.") => match name.as_str() {
+                "fp.add" | "fp.sub" | "fp.mul" | "fp.div" | "fp.sqrt" | "fp.neg" | "fp.abs" => {
+                    args.iter()
+                        .find_map(|arg| match arg.get_type() {
+                            Type::Float(sort) => Some(Type::Float(sort)),
+                            _ => None,
+                        })
+                        .unwrap_or(Type::Int)
+                }
+                "fp.isNaN" | "fp.isInfinite" | "fp.isZero" => Type::Bool,
+                _ => Type::Int,
+            },
+            Expr::App(_, _) => Type::Int, // Fallback hasta completar inferencia global vía symbol table.
             Expr::Ite(_, t, _) => t.get_type(),
         }
     }
@@ -146,6 +167,7 @@ pub enum Type {
     Bool,
     Int,
     Real,
+    Float(fp::FloatSort),
     BitVec(usize),
     String,
     Array(Box<Type>, Box<Type>), // Index Type, Element Type

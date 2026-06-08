@@ -1,5 +1,5 @@
-use rz3::ast::Expr;
-use rz3::parser::Parser;
+use rz3::ast::{fp::FloatSort, Expr, Type};
+use rz3::parser::{Command, Parser};
 use rz3::{Rz3Solver, SolverResult};
 
 fn fp32(sign: u64, exp: u64, sig: u64) -> Expr {
@@ -69,4 +69,48 @@ fn parser_accepts_smtlib_binary_fp_constructor_and_operator() {
             "expected fp.add application"
         ),
     }
+}
+
+#[test]
+fn parser_accepts_smtlib_floatingpoint_sort() {
+    let mut parser = Parser::new("(declare-fun x () (_ FloatingPoint 8 24))");
+    let command = parser.parse_command().unwrap();
+    match command {
+        Command::DeclareFun(name, params, Type::Float(sort)) => {
+            assert_eq!(name, "x");
+            assert!(params.is_empty());
+            assert_eq!(
+                sort,
+                FloatSort {
+                    exponent_bits: 8,
+                    significand_bits: 24
+                }
+            );
+        }
+        other => assert!(
+            matches!(other, Command::DeclareFun(_, _, Type::Float(_))),
+            "expected FP declaration"
+        ),
+    }
+}
+
+#[test]
+fn fp_constructor_and_arithmetic_report_float_type() {
+    let one = fp32(0, 0x7f, 0);
+    assert_eq!(
+        one.get_type(),
+        Type::Float(FloatSort {
+            exponent_bits: 8,
+            significand_bits: 24
+        })
+    );
+
+    let add = Expr::App("fp.add".to_string(), vec![rne(), one.clone(), one]);
+    assert_eq!(
+        add.get_type(),
+        Type::Float(FloatSort {
+            exponent_bits: 8,
+            significand_bits: 24
+        })
+    );
 }
