@@ -1,3 +1,5 @@
+pub mod fp;
+
 impl Expr {
     pub fn get_type(&self) -> Type {
         match self {
@@ -156,6 +158,8 @@ pub enum ModelValue {
     Int(i64),
     Real(num_rational::BigRational),
     BitVec(u64, usize),
+    /// Valor de modelo de punto flotante IEEE-754 exacto (contrato compartido con theory::fp).
+    Float(fp::FloatValue),
 }
 
 impl fmt::Display for Expr {
