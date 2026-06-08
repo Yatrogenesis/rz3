@@ -35,11 +35,10 @@ fn diseq_genuine_unsat_frozen() {
     assert!(matches!(s.check(), SolverResult::Unsat), "x=1 ∧ x≠1 debe ser UNSAT");
 }
 
-/// HALLAZGO SEPARADO (epsilon fijo 1/1000000 en lra.rs): x>0 ∧ x<1/1000000 -> SAT exacto,
-/// pero el código da UNSAT por el epsilon. Requiere δ-racional (milestone aparte, NIST report).
-/// Se deja #[ignore] como evidencia y especificación del fix futuro.
+/// ORÁCULO δ-RACIONAL: x>0 ∧ x<1/1000000 -> SAT exacto.
+/// Antes del fix: la perturbación fija 1/1000000 hacía que el solver eligiera x=1/1000000
+/// y violara la cota superior estricta, devolviendo UNSAT incorrecto.
 #[test]
-#[ignore = "epsilon fijo 1/1000000 (lra.rs) -> false-unsat en intervalos estrechos; requiere delta-racional. Ver AUDITORIA NIST."]
 fn strict_tight_interval_needs_delta_rational() {
     let mut s = Rz3Solver::new();
     let x = real("x");

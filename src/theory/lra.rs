@@ -10,6 +10,76 @@ pub struct Bound {
     pub is_strict: bool,
 }
 
+/// Racional con infinitesimal simbólico positivo: `c + kδ`.
+///
+/// REF: [Dutertre & de Moura, 2006] "A Fast Linear-Arithmetic Solver for DPLL(T)"
+///      DOI: 10.1007/11817963_11
+///      Peer-reviewed: [Computer Aided Verification (CAV), ISSN: 0302-9743]
+///      Validado contra: oráculos LRA de desigualdad y cotas estrictas estrechas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeltaRational {
+    c: Ratio<i64>,
+    k: Ratio<i64>,
+}
+
+impl DeltaRational {
+    fn rational(c: Ratio<i64>) -> Self {
+        Self { c, k: Ratio::new(0, 1) }
+    }
+
+    fn delta_shift(c: Ratio<i64>, k: i64) -> Self {
+        Self { c, k: Ratio::new(k, 1) }
+    }
+
+    fn zero() -> Self {
+        Self::rational(Ratio::new(0, 1))
+    }
+
+    fn add(&self, rhs: &Self) -> Self {
+        Self { c: self.c + rhs.c, k: self.k + rhs.k }
+    }
+
+    fn sub(&self, rhs: &Self) -> Self {
+        Self { c: self.c - rhs.c, k: self.k - rhs.k }
+    }
+
+    fn scale(&self, a: Ratio<i64>) -> Self {
+        Self { c: self.c * a, k: self.k * a }
+    }
+
+    fn lt_rational(&self, rhs: Ratio<i64>) -> bool {
+        self.c < rhs || (self.c == rhs && self.k < Ratio::new(0, 1))
+    }
+
+    fn le_rational(&self, rhs: Ratio<i64>) -> bool {
+        self.c < rhs || (self.c == rhs && self.k <= Ratio::new(0, 1))
+    }
+
+    fn gt_rational(&self, rhs: Ratio<i64>) -> bool {
+        self.c > rhs || (self.c == rhs && self.k > Ratio::new(0, 1))
+    }
+
+    fn ge_rational(&self, rhs: Ratio<i64>) -> bool {
+        self.c > rhs || (self.c == rhs && self.k >= Ratio::new(0, 1))
+    }
+
+    fn lt_delta(&self, rhs: &Self) -> bool {
+        self.c < rhs.c || (self.c == rhs.c && self.k < rhs.k)
+    }
+
+    fn min_delta(self, rhs: Self) -> Self {
+        if self.lt_delta(&rhs) { self } else { rhs }
+    }
+
+    fn is_positive(&self) -> bool {
+        self.c > Ratio::new(0, 1) || (self.c == Ratio::new(0, 1) && self.k > Ratio::new(0, 1))
+    }
+
+    fn is_zero(&self) -> bool {
+        self.c == Ratio::new(0, 1) && self.k == Ratio::new(0, 1)
+    }
+}
+
 /// Solver de Aritmética Lineal Real (LRA).
 /// Utilizará una variante incremental del algoritmo Simplex con aritmética exacta.
 // REF: [Dutertre & de Moura, 2006] "A Fast Linear-Arithmetic Solver for DPLL(T)"
@@ -37,7 +107,7 @@ pub struct LraSolver {
     /// Tableau: filas (variables básicas) -> columnas (variables no básicas -> coeficiente)
     tableau: BTreeMap<usize, BTreeMap<usize, Ratio<i64>>>,
     /// Asignaciones actuales de las variables
-    assignment: BTreeMap<usize, Ratio<i64>>,
+    assignment: BTreeMap<usize, DeltaRational>,
     /// Límites inferiores (Lower bounds)
     lower_bounds: BTreeMap<usize, Bound>,
     /// Límites superiores (Upper bounds)
@@ -108,10 +178,11 @@ impl LraSolver {
 
     /// Returns user-declared variable assignments for model extraction.
     pub fn get_all_assignments(&self) -> Vec<(String, BigRational)> {
+        let delta = self.model_delta();
         self.var_map.iter()
             .filter_map(|(name, &id)| {
-                self.assignment.get(&id).map(|ratio| {
-                    // Conversión exacta Ratio<i64> -> BigRational (sin pérdida, sin f64).
+                self.assignment.get(&id).map(|value| {
+                    let ratio = value.c + value.k * delta;
                     let r = BigRational::new(BigInt::from(*ratio.numer()), BigInt::from(*ratio.denom()));
                     (name.clone(), r)
                 })
@@ -127,7 +198,7 @@ impl LraSolver {
             self.var_map.insert(name.to_string(), id);
             self.next_var_id += 1;
             self.non_basic_vars.push(id);
-            self.assignment.insert(id, Ratio::new(0, 1));
+            self.assignment.insert(id, DeltaRational::zero());
             id
         }
     }
@@ -135,18 +206,18 @@ impl LraSolver {
     fn create_slack_var(&mut self) -> usize {
         let id = self.next_var_id;
         self.next_var_id += 1;
-        self.assignment.insert(id, Ratio::new(0, 1));
+        self.assignment.insert(id, DeltaRational::zero());
         id
     }
 
-    fn update(&mut self, x_j: usize, v: Ratio<i64>) {
-        let diff = v - *self.assignment.get(&x_j).unwrap_or(&Ratio::new(0, 1));
+    fn update(&mut self, x_j: usize, v: DeltaRational) {
+        let diff = v.sub(self.assignment.get(&x_j).unwrap_or(&DeltaRational::zero()));
         self.assignment.insert(x_j, v);
         
         for (&x_i, row) in self.tableau.iter() {
             if let Some(&a_ij) = row.get(&x_j) {
-                let current_val = *self.assignment.get(&x_i).unwrap_or(&Ratio::new(0, 1));
-                self.assignment.insert(x_i, current_val + a_ij * diff);
+                let current_val = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
+                self.assignment.insert(x_i, current_val.add(&diff.scale(a_ij)));
             }
         }
     }
@@ -202,15 +273,15 @@ impl LraSolver {
             basic_vars_sorted.sort_unstable();
 
             for &x_i in &basic_vars_sorted {
-                let val = *self.assignment.get(&x_i).unwrap_or(&Ratio::new(0, 1));
+                let val = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
                 if let Some(lb) = self.lower_bounds.get(&x_i) {
-                    if (lb.is_strict && val <= lb.val) || (!lb.is_strict && val < lb.val) {
+                    if (lb.is_strict && val.le_rational(lb.val)) || (!lb.is_strict && val.lt_rational(lb.val)) {
                         violated_var = Some((x_i, true));
                         break;
                     }
                 }
                 if let Some(ub) = self.upper_bounds.get(&x_i) {
-                    if (ub.is_strict && val >= ub.val) || (!ub.is_strict && val > ub.val) {
+                    if (ub.is_strict && val.ge_rational(ub.val)) || (!ub.is_strict && val.gt_rational(ub.val)) {
                         violated_var = Some((x_i, false));
                         break;
                     }
@@ -224,13 +295,16 @@ impl LraSolver {
                 let mut non_basic_vars = self.non_basic_vars.clone();
                 non_basic_vars.sort_unstable();
 
-                let epsilon = Ratio::new(1, 1000000);
                 let target_val = if is_lower { 
-                    if self.lower_bounds[&x_i].is_strict { self.lower_bounds[&x_i].val + epsilon } else { self.lower_bounds[&x_i].val }
+                    if self.lower_bounds[&x_i].is_strict {
+                        DeltaRational::delta_shift(self.lower_bounds[&x_i].val, 1)
+                    } else {
+                        DeltaRational::rational(self.lower_bounds[&x_i].val)
+                    }
                 } else if self.upper_bounds[&x_i].is_strict {
-                    self.upper_bounds[&x_i].val - epsilon
+                    DeltaRational::delta_shift(self.upper_bounds[&x_i].val, -1)
                 } else {
-                    self.upper_bounds[&x_i].val
+                    DeltaRational::rational(self.upper_bounds[&x_i].val)
                 };
 
                 for &x_j in &non_basic_vars {
@@ -238,10 +312,14 @@ impl LraSolver {
                     let a_ij = *row.get(&x_j).unwrap_or(&Ratio::new(0, 1));
                     if a_ij == Ratio::new(0, 1) { continue; }
                     
-                    let val_j = *self.assignment.get(&x_j).unwrap_or(&Ratio::new(0, 1));
+                    let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
                     
-                    let can_increase = if let Some(ub) = self.upper_bounds.get(&x_j) { val_j < ub.val } else { true };
-                    let can_decrease = if let Some(lb) = self.lower_bounds.get(&x_j) { val_j > lb.val } else { true };
+                    let can_increase = if let Some(ub) = self.upper_bounds.get(&x_j) {
+                        val_j.lt_rational(ub.val)
+                    } else { true };
+                    let can_decrease = if let Some(lb) = self.lower_bounds.get(&x_j) {
+                        val_j.gt_rational(lb.val)
+                    } else { true };
 
                     let a_ij_gt_0 = a_ij > Ratio::new(0, 1);
                     
@@ -270,14 +348,14 @@ impl LraSolver {
                 // reparación y la suma es provablemente constante (todas las vars
                 // pinned lb==ub) -> conflicto genuino (Unsat). Si no es provable o se
                 // agota el presupuesto -> Unknown (sound). [Dutertre-deMoura + advisor].
-                let zero = Ratio::new(0, 1);
                 let mut violated_idx = None;
                 for (idx, (coeffs, target, _)) in self.disequalities.iter().enumerate() {
-                    let mut current_sum = zero;
+                    let mut current_sum = DeltaRational::zero();
                     for (&var, &coeff) in coeffs {
-                        current_sum += coeff * self.assignment.get(&var).unwrap_or(&zero);
+                        let val = self.assignment.get(&var).cloned().unwrap_or_else(DeltaRational::zero);
+                        current_sum = current_sum.add(&val.scale(coeff));
                     }
-                    if current_sum == *target { violated_idx = Some(idx); break; }
+                    if current_sum == DeltaRational::rational(*target) { violated_idx = Some(idx); break; }
                 }
                 match violated_idx {
                     None => return true,
@@ -310,22 +388,36 @@ impl LraSolver {
     /// Máximo movimiento factible (exacto) de la var no-básica `x_j` hacia arriba y
     /// hacia abajo, manteniendo TODAS las vars básicas dentro de sus cotas (ratio test
     /// de Simplex). `None` = sin cota (∞). Asume la asignación actual factible (room>=0).
-    fn feasible_room(&self, x_j: usize) -> (Option<Ratio<i64>>, Option<Ratio<i64>>) {
+    fn feasible_room(&self, x_j: usize) -> (Option<DeltaRational>, Option<DeltaRational>) {
         let zero = Ratio::new(0, 1);
-        let val_j = *self.assignment.get(&x_j).unwrap_or(&zero);
-        let mut up: Option<Ratio<i64>> = self.upper_bounds.get(&x_j).map(|b| b.val - val_j);
-        let mut down: Option<Ratio<i64>> = self.lower_bounds.get(&x_j).map(|b| val_j - b.val);
+        let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
+        let mut up: Option<DeltaRational> = self.upper_bounds.get(&x_j)
+            .map(|b| DeltaRational { c: b.val - val_j.c, k: -val_j.k });
+        let mut down: Option<DeltaRational> = self.lower_bounds.get(&x_j)
+            .map(|b| DeltaRational { c: val_j.c - b.val, k: val_j.k });
         for (&x_i, row) in self.tableau.iter() {
             let a_ij = match row.get(&x_j) { Some(&a) if a != zero => a, _ => continue };
-            let val_i = *self.assignment.get(&x_i).unwrap_or(&zero);
+            let val_i = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
             // Subir x_j por Δ mueve x_i por a_ij*Δ.
             if a_ij > zero {
-                if let Some(ub) = self.upper_bounds.get(&x_i) { let c = (ub.val - val_i) / a_ij; up = Some(up.map_or(c, |u| u.min(c))); }
-                if let Some(lb) = self.lower_bounds.get(&x_i) { let c = (val_i - lb.val) / a_ij; down = Some(down.map_or(c, |d| d.min(c))); }
+                if let Some(ub) = self.upper_bounds.get(&x_i) {
+                    let room = DeltaRational { c: ub.val - val_i.c, k: -val_i.k }.scale(Ratio::new(1, 1) / a_ij);
+                    up = Some(up.map_or(room.clone(), |u| u.min_delta(room)));
+                }
+                if let Some(lb) = self.lower_bounds.get(&x_i) {
+                    let room = DeltaRational { c: val_i.c - lb.val, k: val_i.k }.scale(Ratio::new(1, 1) / a_ij);
+                    down = Some(down.map_or(room.clone(), |d| d.min_delta(room)));
+                }
             } else {
                 let neg = -a_ij;
-                if let Some(lb) = self.lower_bounds.get(&x_i) { let c = (val_i - lb.val) / neg; up = Some(up.map_or(c, |u| u.min(c))); }
-                if let Some(ub) = self.upper_bounds.get(&x_i) { let c = (ub.val - val_i) / neg; down = Some(down.map_or(c, |d| d.min(c))); }
+                if let Some(lb) = self.lower_bounds.get(&x_i) {
+                    let room = DeltaRational { c: val_i.c - lb.val, k: val_i.k }.scale(Ratio::new(1, 1) / neg);
+                    up = Some(up.map_or(room.clone(), |u| u.min_delta(room)));
+                }
+                if let Some(ub) = self.upper_bounds.get(&x_i) {
+                    let room = DeltaRational { c: ub.val - val_i.c, k: -val_i.k }.scale(Ratio::new(1, 1) / neg);
+                    down = Some(down.map_or(room.clone(), |d| d.min_delta(room)));
+                }
             }
         }
         (up, down)
@@ -341,11 +433,11 @@ impl LraSolver {
         let mut nb = self.non_basic_vars.clone();
         nb.sort_unstable();
         let mut any_can_move = false;
-        let mut mover: Option<(usize, Ratio<i64>)> = None;
+        let mut mover: Option<(usize, DeltaRational)> = None;
         for &x_j in &nb {
             let (up, down) = self.feasible_room(x_j);
-            let can_up = up.is_none_or(|r| r > zero);
-            let can_down = down.is_none_or(|r| r > zero);
+            let can_up = up.as_ref().is_none_or(DeltaRational::is_positive);
+            let can_down = down.as_ref().is_none_or(DeltaRational::is_positive);
             if can_up || can_down { any_can_move = true; }
             if mover.is_none() {
                 // r_j = d(sum)/d(x_j): coef propio + Σ_{v básica en coeffs} coef_v * tableau[v][x_j]
@@ -358,17 +450,25 @@ impl LraSolver {
                 if r_j != zero {
                     // Cualquier Δ≠0 factible rompe la igualdad (r_j≠0). Paso exacto acotado.
                     let delta = if can_up {
-                        match up { Some(r) => r.min(one), None => one }
+                        match up.clone() {
+                            Some(r) if r.c > zero => DeltaRational::rational(r.c.min(one)),
+                            Some(r) => DeltaRational { c: zero, k: r.k / Ratio::new(2, 1) },
+                            None => DeltaRational::rational(one),
+                        }
                     } else if can_down {
-                        match down { Some(r) => -(r.min(one)), None => -one }
-                    } else { zero };
-                    if delta != zero { mover = Some((x_j, delta)); }
+                        match down.clone() {
+                            Some(r) if r.c > zero => DeltaRational::rational(-(r.c.min(one))),
+                            Some(r) => DeltaRational { c: zero, k: -(r.k / Ratio::new(2, 1)) },
+                            None => DeltaRational::rational(-one),
+                        }
+                    } else { DeltaRational::zero() };
+                    if !delta.is_zero() { mover = Some((x_j, delta)); }
                 }
             }
         }
         if let Some((x_j, delta)) = mover {
-            let val_j = *self.assignment.get(&x_j).unwrap_or(&zero);
-            self.update(x_j, val_j + delta);
+            let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
+            self.update(x_j, val_j.add(&delta));
             return RepairResult::Moved;
         }
         if any_can_move { RepairResult::Stuck } else { RepairResult::FrozenPolytope }
@@ -382,6 +482,32 @@ impl LraSolver {
         for v in vars {
             if let Some(e) = self.bound_origins.get(&(v, true)) { self.disequality_freeze_origins.push(e.clone()); }
             if let Some(e) = self.bound_origins.get(&(v, false)) { self.disequality_freeze_origins.push(e.clone()); }
+        }
+    }
+
+    fn model_delta(&self) -> Ratio<i64> {
+        let zero = Ratio::new(0, 1);
+        let mut upper: Option<Ratio<i64>> = None;
+        for (&var, value) in &self.assignment {
+            if value.k > zero {
+                if let Some(ub) = self.upper_bounds.get(&var) {
+                    if ub.val > value.c {
+                        let limit = (ub.val - value.c) / value.k;
+                        upper = Some(upper.map_or(limit, |current| current.min(limit)));
+                    }
+                }
+            } else if value.k < zero {
+                if let Some(lb) = self.lower_bounds.get(&var) {
+                    if value.c > lb.val {
+                        let limit = (value.c - lb.val) / -value.k;
+                        upper = Some(upper.map_or(limit, |current| current.min(limit)));
+                    }
+                }
+            }
+        }
+        match upper {
+            Some(limit) if limit > zero => limit / Ratio::new(2, 1),
+            _ => Ratio::new(1, 1),
         }
     }
 }
@@ -424,9 +550,9 @@ impl TheorySolver for LraSolver {
 
         let mut conflict = Vec::new();
         if let Some(x_i) = self.last_conflict_var {
-            let val_i = *self.assignment.get(&x_i).unwrap_or(&Ratio::new(0, 1));
+            let val_i = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
             let is_lower_violated = if let Some(lb) = self.lower_bounds.get(&x_i) {
-                val_i < lb.val || (lb.is_strict && val_i <= lb.val)
+                val_i.lt_rational(lb.val) || (lb.is_strict && val_i.le_rational(lb.val))
             } else { false };
 
             if let Some(expr) = self.bound_origins.get(&(x_i, is_lower_violated)) {
@@ -450,7 +576,9 @@ impl TheorySolver for LraSolver {
         if let Expr::Var(name, Type::Real) = expr {
             if let Some(&id) = self.var_map.get(name) {
                 if let Some(val) = self.assignment.get(&id) {
-                    return Some(ModelValue::Real(BigRational::new(BigInt::from(*val.numer()), BigInt::from(*val.denom())))); // exacto
+                    let delta = self.model_delta();
+                    let concrete = val.c + val.k * delta;
+                    return Some(ModelValue::Real(BigRational::new(BigInt::from(*concrete.numer()), BigInt::from(*concrete.denom())))); // exacto
                 }
             }
         }
