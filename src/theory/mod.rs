@@ -5,6 +5,7 @@ pub mod array;
 pub mod quantifier;
 pub mod string;
 pub mod nla;
+pub mod fp;
 
 pub use lra::LraSolver;
 pub use euf::EufSolver;
@@ -13,6 +14,7 @@ pub use array::ArraySolver;
 pub use quantifier::QuantifierSolver;
 pub use string::StringSolver;
 pub use nla::NlaSolver;
+pub use crate::ast::fp::{FloatSort, FloatValue, RoundingMode};
 
 use crate::ast::{Expr, ModelValue};
 

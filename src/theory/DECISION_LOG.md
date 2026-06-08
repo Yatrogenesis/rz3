@@ -18,3 +18,12 @@
 - Criterio de aceptación: Variables are consistently mapped to unique indices within a single solver session.
 - Aprobado por: Automonous Agent.
 
+## DEC-003 — Ground-FP IEEE-754 Integration Scope
+- Fecha: 2026-06-08
+- Sesión: codex
+- Motivo: Integrar razonamiento FP real sin invadir el contrato AST propiedad de level-a/master.
+- Alternativas descartadas: Extender `ast::Type` desde level-b (viola ownership); definir tipos FP locales en `theory::fp` (duplica contrato canonico); usar `f32`/`f64` host (rompe exactitud y determinismo bit-a-bit).
+- Tradeoffs: Ground-FP queda operativo y verificable; FP con variables/modelo completo queda bloqueado hasta que el contrato canonico exponga `Type::Float` o equivalente.
+- Impacto: Permite detectar conflictos FP ground con semantica IEEE-754 exacta usando `crate::ast::fp::*` y `ModelValue::Float`.
+- Criterio de aceptación: `cargo test -p rz3 theory::fp -- --nocapture`, `cargo test -p rz3 --test fp_ground_tests -- --nocapture`, `cargo test --workspace --no-fail-fast`, determinismo n=30 con hash identico.
+- Aprobado por: Francisco Molina Burgos (autor), bajo instruccion de no tocar ownership de `ast`.

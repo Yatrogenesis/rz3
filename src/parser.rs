@@ -6,6 +6,7 @@ pub enum Token {
     Keyword(String),
     Int(i64),
     Real(f64),
+    BitVec(u64, usize),
     String(String),
 }
 
@@ -43,6 +44,25 @@ impl<'a> Lexer<'a> {
                     s.push(next);
                 }
                 Some(Token::String(s))
+            }
+            '#' => {
+                let base = self.chars.next()?;
+                if base != 'b' {
+                    return self.next_token();
+                }
+                let mut value = 0u64;
+                let mut width = 0usize;
+                while let Some(&next) = self.chars.peek() {
+                    match next {
+                        '0' | '1' => {
+                            value = (value << 1) | u64::from(next == '1');
+                            width += 1;
+                            self.chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if width == 0 { self.next_token() } else { Some(Token::BitVec(value, width)) }
             }
             c if c.is_ascii_digit() || (c == '-' && self.chars.peek().is_some_and(|&n| n.is_ascii_digit())) => {
                 let mut s = String::new();
@@ -192,6 +212,7 @@ impl<'a> Parser<'a> {
                     Token::Symbol(s) => s,
                     Token::Int(i) => i.to_string(),
                     Token::Real(f) => f.to_string(),
+                    Token::BitVec(v, w) => format!("#b{:0width$b}", v, width = w),
                     Token::String(s) => s,
                     _ => return None,
                 };
@@ -239,6 +260,7 @@ impl<'a> Parser<'a> {
                     Token::Int(i) => i.to_string(),
                     Token::String(s) => s,
                     Token::Real(f) => f.to_string(),
+                    Token::BitVec(v, w) => format!("#b{:0width$b}", v, width = w),
                     _ => return None,
                 };
                 self.next_token(); // RParen
@@ -318,6 +340,7 @@ impl<'a> Parser<'a> {
         let token = self.next_token()?;
         match token {
             Token::Int(i) => Some(Expr::Int(i)),
+            Token::BitVec(value, width) => Some(Expr::BvConst(value, width)),
             Token::Real(f) => {
                 let s = f.to_string();
                 if let Some(pos) = s.find('.') {
@@ -368,7 +391,7 @@ impl<'a> Parser<'a> {
                         Box::new(args[1].clone()),
                         Box::new(args[2].clone()),
                     )),
-                    _ => None,
+                    _ => Some(Expr::App(op, args)),
                 }
             }
             _ => None,

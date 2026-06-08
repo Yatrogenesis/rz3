@@ -7,6 +7,7 @@ pub mod proof;
 
 use crate::sat::CdclSolver;
 use crate::theory::{LraSolver, EufSolver, TheorySolver, ArraySolver, QuantifierSolver, StringSolver, NlaSolver};
+use crate::theory::fp::FpSolver;
 use crate::tactic::{Simplifier, TacticEngine, SolveEqs};
 use std::collections::BTreeMap;
 use crate::ast::{Expr, Type, ModelValue};
@@ -34,6 +35,7 @@ pub struct Rz3Solver {
     quant: QuantifierSolver,
     string: StringSolver,
     nla: NlaSolver,
+    fp: FpSolver,
     proof_gen: crate::proof::Proof,
 
     /// All asserted expressions in order — used for push/pop rebuild.
@@ -68,6 +70,7 @@ impl Rz3Solver {
             quant: QuantifierSolver::new(),
             string: StringSolver::new(),
             nla: NlaSolver::new(),
+            fp: FpSolver::new(),
             proof_gen: crate::proof::Proof::new(),
             assertion_history: Vec::new(),
             scope_stack: Vec::new(),
@@ -109,6 +112,7 @@ impl Rz3Solver {
         self.quant = QuantifierSolver::new();
         self.string = StringSolver::new();
         self.nla = NlaSolver::new();
+        self.fp = FpSolver::new();
         self.proof_gen = crate::proof::Proof::new();
 
         self.symbol_table = sym;
@@ -133,6 +137,7 @@ impl Rz3Solver {
         self.quant.assert(&simplified);
         self.string.assert(&simplified);
         self.nla.assert(&simplified);
+        self.fp.assert(&simplified);
         let lit = self.tseitin(&simplified);
         let _ = self.sat_solver.add_clause(vec![lit]);
     }
@@ -313,6 +318,7 @@ impl Rz3Solver {
             self.quant.reset();
             self.string.reset();
             self.nla.reset();
+            self.fp.reset();
             
             for (expr, &lit) in &self.expr_to_lit {
                 let assign = self.sat_solver.get_lit_value(lit);
@@ -329,6 +335,7 @@ impl Rz3Solver {
                     self.quant.assert(&a);
                     self.string.assert(&a);
                     self.nla.assert(&a);
+                    self.fp.assert(&a);
                 }
             }
 
@@ -340,8 +347,9 @@ impl Rz3Solver {
             let array_ok = self.array.check();
             let string_ok = self.string.check();
             let nla_ok = self.nla.check();
+            let fp_ok = self.fp.check();
 
-            if lra_ok && euf_ok && array_ok && string_ok && nla_ok {
+            if lra_ok && euf_ok && array_ok && string_ok && nla_ok && fp_ok {
                 let model = self.get_model();
                 let array_lemmas = self.array.generate_lemmas();
                 let quant_lemmas = self.quant.generate_lemmas(&mut self.euf, &model);
@@ -378,6 +386,14 @@ impl Rz3Solver {
                     let conflict = self.nla.explain();
                     if !conflict.is_empty() {
                         self.proof_gen.add_step(crate::proof::ProofStep::TheoryLemma(conflict.clone(), "NLA".to_string()));
+                        self.learn_conflict(&conflict);
+                        explanation_found = true;
+                    }
+                }
+                if !fp_ok {
+                    let conflict = self.fp.explain();
+                    if !conflict.is_empty() {
+                        self.proof_gen.add_step(crate::proof::ProofStep::TheoryLemma(conflict.clone(), "FP".to_string()));
                         self.learn_conflict(&conflict);
                         explanation_found = true;
                     }
