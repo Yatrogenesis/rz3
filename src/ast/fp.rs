@@ -25,7 +25,7 @@ pub struct FloatSort {
     pub significand_bits: u16,
 }
 
-/// Clase de valor IEEE-754 con representación EXACTA (sin f64/aproximación).
+/// Clase de valor IEEE-754 con representación EXACTA (sin floats nativos/aproximación).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloatClass {
     QuietNaN { payload: BigUint },

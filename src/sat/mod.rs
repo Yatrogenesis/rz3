@@ -15,7 +15,7 @@ struct Watch {
 pub struct ClauseArena {
     data: Vec<i32>,
     /// Mapeo de ID -> (Actividad, LBD)
-    metadata: BTreeMap<usize, (f32, usize)>,
+    metadata: BTreeMap<usize, (u64, usize)>,
 }
 
 impl ClauseArena {
@@ -33,15 +33,15 @@ impl ClauseArena {
         self.data.push(header);
         self.data.extend_from_slice(lits);
         if learned {
-            self.metadata.insert(idx, (0.0, lbd));
+            self.metadata.insert(idx, (0, lbd));
         }
         ClauseIdx(idx)
     }
 
     #[inline] fn is_deleted(&self, idx: ClauseIdx) -> bool { (self.data[idx.0] & 2) != 0 }
     #[inline] fn mark_deleted(&mut self, idx: ClauseIdx) { self.data[idx.0] |= 2; }
-    #[inline] fn bump_activity(&mut self, idx: ClauseIdx, inc: f32) {
-        if let Some(meta) = self.metadata.get_mut(&idx.0) { meta.0 += inc; }
+    #[inline] fn bump_activity(&mut self, idx: ClauseIdx, inc: u64) {
+        if let Some(meta) = self.metadata.get_mut(&idx.0) { meta.0 = meta.0.saturating_add(inc); }
     }
     #[inline] fn get_len(&self, idx: ClauseIdx) -> usize { (self.data[idx.0] >> 2) as usize }
     #[inline] fn get_lits_mut(&mut self, idx: ClauseIdx) -> &mut [Literal] {
@@ -54,17 +54,13 @@ impl ClauseArena {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Assignment { True, False, Unassigned }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Activity { score: f64, var: usize }
-impl Eq for Activity {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Activity { score: u64, var: usize }
 impl Ord for Activity {
     // Determinismo explícito: en empate de score, desempatar por índice de variable
     // (orden total), sin depender de la estructura interna del heap. [Fase 3]
     fn cmp(&self, other: &Self) -> Ordering {
-        self.score
-            .partial_cmp(&other.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| self.var.cmp(&other.var))
+        self.score.cmp(&other.score).then_with(|| self.var.cmp(&other.var))
     }
 }
 impl PartialOrd for Activity {
@@ -81,10 +77,10 @@ pub struct CdclSolver {
     trail_lim: Vec<usize>,
     qhead: usize,
     current_level: usize,
-    scores: Vec<f64>,
+    scores: Vec<u64>,
     phases: Vec<Assignment>,
     activity_heap: BinaryHeap<Activity>,
-    score_inc: f64,
+    score_inc: u64,
     pub ok: bool,
 }
 
@@ -105,7 +101,7 @@ impl CdclSolver {
             scores: Vec::new(),
             phases: Vec::new(),
             activity_heap: BinaryHeap::new(),
-            score_inc: 1.0,
+            score_inc: 1,
             ok: true,
         }
     }
@@ -116,10 +112,10 @@ impl CdclSolver {
             self.assignments.resize(var + 1, Assignment::Unassigned);
             self.levels.resize(var + 1, 0);
             self.reasons.resize(var + 1, None);
-            self.scores.resize(var + 1, 0.0);
+            self.scores.resize(var + 1, 0);
             self.phases.resize(var + 1, Assignment::False);
             self.watches.resize((var + 1) * 2 + 2, Vec::new());
-            for i in old_len..=var { self.activity_heap.push(Activity { score: 0.0, var: i }); }
+            for i in old_len..=var { self.activity_heap.push(Activity { score: 0, var: i }); }
         }
     }
 
@@ -258,7 +254,7 @@ impl CdclSolver {
 
     fn reduce_learned(&mut self) {
         let mut learned = self.clauses.metadata.iter().map(|(&idx, &(act, lbd))| (idx, act, lbd)).collect::<Vec<_>>();
-        learned.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal)));
+        learned.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
         for (idx_val, _, lbd) in learned.iter().take(learned.len() / 2) {
             let idx = ClauseIdx(*idx_val);
             if *lbd <= 2 { continue; } // Keep high-quality clauses
@@ -274,12 +270,19 @@ impl CdclSolver {
         None
     }
 
-    fn decay_scores(&mut self) { self.score_inc /= 0.95; }
+    fn decay_scores(&mut self) {
+        self.score_inc = self.score_inc.saturating_mul(105).div_ceil(100).max(1);
+    }
+
     fn bump_score(&mut self, var: usize) {
-        self.scores[var] += self.score_inc; self.activity_heap.push(Activity { score: self.scores[var], var });
-        if self.scores[var] > 1e100 {
-            for (i, s) in self.scores.iter_mut().enumerate() { *s *= 1e-100; self.activity_heap.push(Activity { score: *s, var: i }); }
-            self.score_inc *= 1e-100;
+        self.scores[var] = self.scores[var].saturating_add(self.score_inc);
+        self.activity_heap.push(Activity { score: self.scores[var], var });
+        if self.scores[var] > 1_000_000_000_000_000_000 {
+            for (i, s) in self.scores.iter_mut().enumerate() {
+                *s /= 1_000_000;
+                self.activity_heap.push(Activity { score: *s, var: i });
+            }
+            self.score_inc = (self.score_inc / 1_000_000).max(1);
         }
     }
 
@@ -302,7 +305,7 @@ impl CdclSolver {
         let mut counter = 0; let mut p = self.trail.len() as isize - 1;
         let mut current = conflict_idx;
         loop {
-            self.clauses.bump_activity(current, 1.0);
+            self.clauses.bump_activity(current, 1);
             for i in 0..self.clauses.get_len(current) {
                 let var = self.clauses.get_lit(current, i).unsigned_abs() as usize;
                 if !seen[var] && self.levels[var] > 0 {

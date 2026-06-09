@@ -5,7 +5,7 @@ pub enum Token {
     Symbol(String),
     Keyword(String),
     Int(i64),
-    Real(f64),
+    Real(i64, u32),
     BitVec(u64, usize),
     String(String),
 }
@@ -75,7 +75,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 if s.contains('.') {
-                    Some(Token::Real(s.parse().unwrap_or(0.0)))
+                    parse_decimal_token(&s).map(|(mantissa, scale)| Token::Real(mantissa, scale))
                 } else {
                     Some(Token::Int(s.parse().unwrap_or(0)))
                 }
@@ -113,6 +113,40 @@ impl<'a> Lexer<'a> {
 
 fn is_symbol_char(c: char) -> bool {
     c.is_alphabetic() || "~!@$%^&*_-+=<>.?/".contains(c)
+}
+
+fn parse_decimal_token(s: &str) -> Option<(i64, u32)> {
+    let negative = s.starts_with('-');
+    let body = if negative { &s[1..] } else { s };
+    let (whole, frac) = body.split_once('.')?;
+    if whole.is_empty() && frac.is_empty() {
+        return None;
+    }
+    let mut digits = String::new();
+    digits.push_str(if whole.is_empty() { "0" } else { whole });
+    digits.push_str(frac);
+    let mut mantissa = digits.parse::<i64>().ok()?;
+    if negative {
+        mantissa = -mantissa;
+    }
+    Some((mantissa, frac.len() as u32))
+}
+
+fn format_real_token(mantissa: i64, scale: u32) -> String {
+    if scale == 0 {
+        return mantissa.to_string();
+    }
+    let negative = mantissa < 0;
+    let digits = mantissa.abs().to_string();
+    let scale_usize = scale as usize;
+    let out = if digits.len() <= scale_usize {
+        let zeros = "0".repeat(scale_usize - digits.len());
+        format!("0.{}{}", zeros, digits)
+    } else {
+        let split = digits.len() - scale_usize;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if negative { format!("-{}", out) } else { out }
 }
 
 use crate::ast::{fp::FloatSort, Expr, Type};
@@ -222,7 +256,7 @@ impl<'a> Parser<'a> {
                 let value = match self.next_token()? {
                     Token::Symbol(s) => s,
                     Token::Int(i) => i.to_string(),
-                    Token::Real(f) => f.to_string(),
+                    Token::Real(i, s) => format_real_token(i, s),
                     Token::BitVec(v, w) => format!("#b{:0width$b}", v, width = w),
                     Token::String(s) => s,
                     _ => return None,
@@ -270,7 +304,7 @@ impl<'a> Parser<'a> {
                     Token::Symbol(s) => s,
                     Token::Int(i) => i.to_string(),
                     Token::String(s) => s,
-                    Token::Real(f) => f.to_string(),
+                    Token::Real(i, s) => format_real_token(i, s),
                     Token::BitVec(v, w) => format!("#b{:0width$b}", v, width = w),
                     _ => return None,
                 };
@@ -352,16 +386,7 @@ impl<'a> Parser<'a> {
         match token {
             Token::Int(i) => Some(Expr::Int(i)),
             Token::BitVec(value, width) => Some(Expr::BvConst(value, width)),
-            Token::Real(f) => {
-                let s = f.to_string();
-                if let Some(pos) = s.find('.') {
-                    let decimal_places = s.len() - pos - 1;
-                    let val = (f * 10f64.powi(decimal_places as i32)).round() as i64;
-                    Some(Expr::Real(val, decimal_places as u32))
-                } else {
-                    Some(Expr::Real(f as i64, 0))
-                }
-            }
+            Token::Real(i, s) => Some(Expr::Real(i, s)),
             Token::Symbol(s) => {
                 match s.as_str() {
                     "true" => Some(Expr::Bool(true)),

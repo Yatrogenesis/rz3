@@ -33,6 +33,6 @@ pub trait TheorySolver {
 
 #[derive(Debug, Clone)]
 pub struct Bound {
-    pub val: f64,
+    pub val: num_rational::BigRational,
     pub is_strict: bool,
 }
