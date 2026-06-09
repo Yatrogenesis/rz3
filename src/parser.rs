@@ -33,7 +33,8 @@ impl<'a> Lexer<'a> {
                 s.push(':');
                 while let Some(&next) = self.chars.peek() {
                     if next.is_whitespace() || next == '(' || next == ')' { break; }
-                    s.push(self.chars.next().unwrap());
+                    let Some(consumed) = self.chars.next() else { break; };
+                    s.push(consumed);
                 }
                 Some(Token::Keyword(s))
             }
@@ -69,7 +70,8 @@ impl<'a> Lexer<'a> {
                 s.push(c);
                 while let Some(&next) = self.chars.peek() {
                     if next.is_ascii_digit() || next == '.' {
-                        s.push(self.chars.next().unwrap());
+                        let Some(consumed) = self.chars.next() else { break; };
+                        s.push(consumed);
                     } else {
                         break;
                     }
@@ -77,7 +79,7 @@ impl<'a> Lexer<'a> {
                 if s.contains('.') {
                     parse_decimal_token(&s).map(|(mantissa, scale)| Token::Real(mantissa, scale))
                 } else {
-                    Some(Token::Int(s.parse().unwrap_or(0)))
+                    s.parse().ok().map(Token::Int)
                 }
             }
             c if is_symbol_char(c) => {
@@ -85,7 +87,8 @@ impl<'a> Lexer<'a> {
                 s.push(c);
                 while let Some(&next) = self.chars.peek() {
                     if is_symbol_char(next) || next.is_ascii_digit() {
-                        s.push(self.chars.next().unwrap());
+                        let Some(consumed) = self.chars.next() else { break; };
+                        s.push(consumed);
                     } else {
                         break;
                     }
@@ -160,6 +163,7 @@ pub enum Command {
     Assert(Expr),
     CheckSat,
     GetModel,
+    GetValue(Vec<Expr>),
     Push(usize),
     Pop(usize),
     Exit,
@@ -274,8 +278,7 @@ impl<'a> Parser<'a> {
                 }
                 self.next_token(); // RParen (expr list)
                 self.next_token(); // RParen (command)
-                // Note: Command::GetModel is reused or we should add GetValue
-                Command::GetModel 
+                Command::GetValue(exprs)
             }
             "push" => {
                 let n = if let Some(Token::Int(i)) = self.peek_token() {

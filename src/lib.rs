@@ -11,8 +11,11 @@ use crate::theory::fp::FpSolver;
 use crate::tactic::{Simplifier, TacticEngine, SolveEqs};
 use std::collections::BTreeMap;
 use crate::ast::{Expr, Type, ModelValue};
+use num_bigint::BigInt;
+use num_rational::BigRational;
 use num_traits::ToPrimitive;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverResult {
     Sat,
     Unsat,
@@ -346,6 +349,39 @@ impl Rz3Solver {
         }
 
         model
+    }
+
+    pub fn get_value(&self, expr: &Expr) -> Option<ModelValue> {
+        let typed = self.resolve_expr_types(expr);
+        if let Some(value) = Self::literal_model_value(&typed) {
+            return Some(value);
+        }
+        if let Expr::Var(name, _) = &typed {
+            return self.get_model().get(name).cloned();
+        }
+        self.fp.get_model_value(&typed)
+            .or_else(|| self.lra.get_model_value(&typed))
+            .or_else(|| self.euf.get_model_value(&typed))
+            .or_else(|| self.array.get_model_value(&typed))
+            .or_else(|| self.string.get_model_value(&typed))
+            .or_else(|| self.nla.get_model_value(&typed))
+            .or_else(|| self.quant.get_model_value(&typed))
+    }
+
+    fn literal_model_value(expr: &Expr) -> Option<ModelValue> {
+        match expr {
+            Expr::Bool(value) => Some(ModelValue::Bool(*value)),
+            Expr::Int(value) => Some(ModelValue::Int(*value)),
+            Expr::Real(value, scale) => {
+                let denominator = BigInt::from(10u8).pow(*scale);
+                Some(ModelValue::Real(BigRational::new(
+                    BigInt::from(*value),
+                    denominator,
+                )))
+            }
+            Expr::BvConst(value, width) => Some(ModelValue::BitVec(*value, *width)),
+            _ => None,
+        }
     }
 
     fn get_or_create_lit(&mut self, expr: &Expr) -> i32 {
