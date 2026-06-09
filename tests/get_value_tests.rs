@@ -60,6 +60,28 @@ fn get_value_returns_exact_lra_rational_model_value() {
 }
 
 #[test]
+fn get_value_handles_large_decimal_scale_without_i64_overflow() {
+    let x = Expr::Var("tiny".to_string(), Type::Real);
+    let mut solver = Rz3Solver::new();
+    solver.declare_fun("tiny".to_string(), Type::Real);
+    solver.assert(&Expr::Eq(Box::new(x.clone()), Box::new(Expr::Real(1, 30))));
+
+    assert!(matches!(solver.check(), SolverResult::Sat));
+    let value = match solver.get_value(&x) {
+        Some(value) => value,
+        None => {
+            assert!(solver.get_value(&x).is_some(), "expected exact model value for tiny");
+            return;
+        }
+    };
+
+    assert!(matches!(
+        value,
+        ModelValue::Real(r) if r == BigRational::new(BigInt::from(1), BigInt::from(10u8).pow(30))
+    ));
+}
+
+#[test]
 fn get_value_returns_exact_ground_fp_value() {
     let one = fp32(0, 0x7f, 0);
     let solver = Rz3Solver::new();

@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use crate::ast::{Expr, Type, ModelValue};
 use num_bigint::BigInt;
 use num_rational::BigRational;
-use num_traits::ToPrimitive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverResult {
@@ -342,7 +341,7 @@ impl Rz3Solver {
         for (name, val) in self.lra.get_all_assignments() {
             model.entry(name.clone()).or_insert_with(|| {
                 match self.symbol_table.get(&name) {
-                    Some(crate::ast::Type::Int) => ModelValue::Int(val.to_integer().to_i64().unwrap_or(0)),
+                    Some(crate::ast::Type::Int) => ModelValue::Int(val.to_integer()),
                     _ => ModelValue::Real(val),
                 }
             });
@@ -371,7 +370,7 @@ impl Rz3Solver {
     fn literal_model_value(expr: &Expr) -> Option<ModelValue> {
         match expr {
             Expr::Bool(value) => Some(ModelValue::Bool(*value)),
-            Expr::Int(value) => Some(ModelValue::Int(*value)),
+            Expr::Int(value) => Some(ModelValue::Int(BigInt::from(*value))),
             Expr::Real(value, scale) => {
                 let denominator = BigInt::from(10u8).pow(*scale);
                 Some(ModelValue::Real(BigRational::new(

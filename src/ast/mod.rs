@@ -108,6 +108,7 @@ impl Expr {
 use std::collections::BTreeMap;
 use std::fmt;
 
+use num_bigint::BigInt;
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -178,7 +179,7 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub enum ModelValue {
     Bool(bool),
-    Int(i64),
+    Int(BigInt),
     Real(num_rational::BigRational),
     BitVec(u64, usize),
     /// Valor de modelo de punto flotante IEEE-754 exacto (contrato compartido con theory::fp).

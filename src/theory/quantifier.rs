@@ -80,7 +80,9 @@ impl QuantifierSolver {
                     let mut sub = BTreeMap::new();
                     for (name, ty) in vars {
                         if let Some(val) = model.get(name) {
-                            sub.insert(name.clone(), self.model_val_to_expr(val, ty));
+                            if let Some(expr) = self.model_val_to_expr(val, ty) {
+                                sub.insert(name.clone(), expr);
+                            }
                         }
                     }
                     let instantiated = body.substitute(&sub);
@@ -110,7 +112,9 @@ impl QuantifierSolver {
                 let mut sub = BTreeMap::new();
                 for (name, ty) in vars {
                     if let Some(val) = model.get(name) {
-                        sub.insert(name.clone(), self.model_val_to_expr(val, ty));
+                        if let Some(expr) = self.model_val_to_expr(val, ty) {
+                            sub.insert(name.clone(), expr);
+                        }
                     }
                 }
                 let instantiated = body.substitute(&sub);
@@ -127,8 +131,8 @@ impl QuantifierSolver {
         match expr {
             Expr::Var(name, _) => model.get(name).cloned(),
             Expr::Bool(b) => Some(ModelValue::Bool(*b)),
-            Expr::Int(i) => Some(ModelValue::Int(*i)),
-            Expr::Real(i, s) => Some(ModelValue::Real(BigRational::new(BigInt::from(*i), BigInt::from(10i64.pow(*s))))),
+            Expr::Int(i) => Some(ModelValue::Int(BigInt::from(*i))),
+            Expr::Real(i, s) => Some(ModelValue::Real(BigRational::new(BigInt::from(*i), BigInt::from(10u8).pow(*s)))),
             Expr::And(args) => {
                 let mut res = true;
                 for arg in args {
@@ -157,12 +161,12 @@ impl QuantifierSolver {
         }
     }
 
-    fn model_val_to_expr(&self, val: &ModelValue, ty: &Type) -> Expr {
+    fn model_val_to_expr(&self, val: &ModelValue, ty: &Type) -> Option<Expr> {
         match (val, ty) {
-            (ModelValue::Bool(b), _) => Expr::Bool(*b),
-            (ModelValue::Int(i), _) => Expr::Int(*i),
-            (ModelValue::Real(r), _) => Expr::Real(r.to_integer().to_i64().unwrap_or(0), 0),
-            _ => Expr::Bool(true),
+            (ModelValue::Bool(b), _) => Some(Expr::Bool(*b)),
+            (ModelValue::Int(i), _) => i.to_i64().map(Expr::Int),
+            (ModelValue::Real(r), _) if r.is_integer() => r.to_integer().to_i64().map(|i| Expr::Real(i, 0)),
+            _ => None,
         }
     }
 
@@ -224,7 +228,9 @@ impl QuantifierSolver {
         match pattern {
             Expr::Var(name, _) if ctx.vars.iter().any(|(v, _)| v == name) => {
                 if let Some(existing) = current_sub.get(name) {
-                    let existing_id = ctx.euf.get_id_public(existing).unwrap();
+                    let Some(existing_id) = ctx.euf.get_id_public(existing) else {
+                        return false;
+                    };
                     return ctx.euf.find_public(existing_id) == ctx.euf.find_public(term_id);
                 } else {
                     current_sub.insert(name.clone(), ctx.euf.get_expr(term_id).clone());
