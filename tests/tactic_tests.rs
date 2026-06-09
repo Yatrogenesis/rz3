@@ -26,12 +26,10 @@ fn test_simplify_arithmetic() {
     let expr = Expr::Add(vec![x.clone(), Expr::Int(2), Expr::Int(3)]);
     let simplified = Simplifier::simplify(expr);
     // Nota: El simplificador actual pone las constantes al final
-    if let Expr::Add(args) = simplified {
-        assert!(args.contains(&x));
-        assert!(args.contains(&Expr::Int(5)));
-    } else {
-        panic!("Should be an Add expression");
-    }
+    assert!(matches!(simplified, Expr::Add(_)));
+    let Expr::Add(args) = simplified else { return; };
+    assert!(args.contains(&x));
+    assert!(args.contains(&Expr::Int(5)));
 }
 
 #[test]
