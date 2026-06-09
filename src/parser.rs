@@ -126,6 +126,8 @@ pub enum Command {
     Assert(Expr),
     CheckSat,
     GetModel,
+    Push(usize),
+    Pop(usize),
     Exit,
     SetInfo(String, String),
 }
@@ -172,14 +174,12 @@ impl<'a> Parser<'a> {
                             if op_s == "BitVec" {
                                 if let Some(Token::Int(w)) = self.next_token() {
                                     self.next_token(); // RParen
-                                    self.next_token(); // RParen
                                     return Some(Type::BitVec(w as usize));
                                 }
                             } else if op_s == "FloatingPoint" {
                                 if let (Some(Token::Int(ebits)), Some(Token::Int(sbits))) =
                                     (self.next_token(), self.next_token())
                                 {
-                                    self.next_token(); // RParen
                                     self.next_token(); // RParen
                                     return Some(Type::Float(FloatSort {
                                         exponent_bits: ebits as u16,
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
                     val as usize
                 } else { 1 };
                 self.next_token(); // RParen
-                Command::SetOption(":push".to_string(), n.to_string())
+                Command::Push(n)
             }
             "pop" => {
                 let n = if let Some(Token::Int(i)) = self.peek_token() {
@@ -259,7 +259,7 @@ impl<'a> Parser<'a> {
                     val as usize
                 } else { 1 };
                 self.next_token(); // RParen
-                Command::SetOption(":pop".to_string(), n.to_string())
+                Command::Pop(n)
             }
             "set-info" => {
                 let key = match self.next_token()? {

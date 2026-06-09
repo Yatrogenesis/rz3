@@ -25,7 +25,7 @@ impl Expr {
                 if let (Type::BitVec(wa), Type::BitVec(wb)) = (a.get_type(), b.get_type()) {
                     Type::BitVec(wa + wb)
                 } else {
-                    Type::BitVec(0)
+                    Type::Unknown
                 }
             }
             
@@ -33,7 +33,7 @@ impl Expr {
                 if let Type::Array(_, ety) = a.get_type() {
                     *ety
                 } else {
-                    Type::Int // Fallback
+                    Type::Unknown
                 }
             }
             Expr::Store(a, _, _) => a.get_type(),
@@ -47,7 +47,7 @@ impl Expr {
                         significand_bits: (*sig_bits + 1) as u16,
                     })
                 }
-                _ => Type::Int,
+                _ => Type::Unknown,
             },
             Expr::App(name, args) if name.starts_with("fp.") => match name.as_str() {
                 "fp.add" | "fp.sub" | "fp.mul" | "fp.div" | "fp.sqrt" | "fp.neg" | "fp.abs" => {
@@ -56,12 +56,12 @@ impl Expr {
                             Type::Float(sort) => Some(Type::Float(sort)),
                             _ => None,
                         })
-                        .unwrap_or(Type::Int)
+                        .unwrap_or(Type::Unknown)
                 }
                 "fp.isNaN" | "fp.isInfinite" | "fp.isZero" => Type::Bool,
-                _ => Type::Int,
+                _ => Type::Unknown,
             },
-            Expr::App(_, _) => Type::Int, // Fallback hasta completar inferencia global vía symbol table.
+            Expr::App(_, _) => Type::Unknown,
             Expr::Ite(_, t, _) => t.get_type(),
         }
     }
@@ -164,6 +164,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum Type {
+    Unknown,
     Bool,
     Int,
     Real,

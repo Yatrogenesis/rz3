@@ -125,7 +125,8 @@ impl Rz3Solver {
     }
 
     fn assert_no_track(&mut self, expr: &Expr) {
-        let simplified = self.tactic_engine.apply(expr.clone());
+        let typed = self.resolve_expr_types(expr);
+        let simplified = self.tactic_engine.apply(typed);
         if let Expr::Bool(true) = simplified { return; }
         if let Expr::Bool(false) = simplified {
             self.sat_solver.ok = false;
@@ -144,6 +145,166 @@ impl Rz3Solver {
 
     pub fn declare_fun(&mut self, name: String, ty: Type) {
         self.symbol_table.insert(name, ty);
+    }
+
+    pub fn declare_fun_signature(&mut self, name: String, params: Vec<Type>, return_type: Type) {
+        let ty = if params.is_empty() {
+            return_type
+        } else {
+            Type::Fn(params, Box::new(return_type))
+        };
+        self.declare_fun(name, ty);
+    }
+
+    fn resolve_expr_types(&self, expr: &Expr) -> Expr {
+        match expr {
+            Expr::Var(name, _) => {
+                let ty = self.symbol_table.get(name).cloned().unwrap_or_else(|| expr.get_type());
+                Expr::Var(name.clone(), ty)
+            }
+            Expr::And(args) => Expr::And(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::Or(args) => Expr::Or(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::Not(inner) => Expr::Not(Box::new(self.resolve_expr_types(inner))),
+            Expr::Implies(a, b) => Expr::Implies(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Ite(c, t, e) => Expr::Ite(
+                Box::new(self.resolve_expr_types(c)),
+                Box::new(self.resolve_expr_types(t)),
+                Box::new(self.resolve_expr_types(e)),
+            ),
+            Expr::Eq(a, b) => Expr::Eq(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Lt(a, b) => Expr::Lt(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Le(a, b) => Expr::Le(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Gt(a, b) => Expr::Gt(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Ge(a, b) => Expr::Ge(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Add(args) => Expr::Add(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::Sub(args) => Expr::Sub(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::Mul(args) => Expr::Mul(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::Div(a, b) => Expr::Div(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::App(name, args) => {
+                Expr::App(name.clone(), args.iter().map(|a| self.resolve_expr_types(a)).collect())
+            }
+            Expr::BvAdd(a, b) => Expr::BvAdd(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvSub(a, b) => Expr::BvSub(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvMul(a, b) => Expr::BvMul(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvAnd(a, b) => Expr::BvAnd(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvOr(a, b) => Expr::BvOr(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvXor(a, b) => Expr::BvXor(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvNot(inner) => Expr::BvNot(Box::new(self.resolve_expr_types(inner))),
+            Expr::BvShl(a, b) => Expr::BvShl(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvLshr(a, b) => Expr::BvLshr(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvAshr(a, b) => Expr::BvAshr(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvUle(a, b) => Expr::BvUle(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvUlt(a, b) => Expr::BvUlt(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvSle(a, b) => Expr::BvSle(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvSlt(a, b) => Expr::BvSlt(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::BvExtract(h, l, inner) => Expr::BvExtract(*h, *l, Box::new(self.resolve_expr_types(inner))),
+            Expr::BvConcat(a, b) => Expr::BvConcat(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            Expr::Select(a, i) => Expr::Select(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(i)),
+            ),
+            Expr::Store(a, i, v) => Expr::Store(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(i)),
+                Box::new(self.resolve_expr_types(v)),
+            ),
+            Expr::ForAll(vars, body) => Expr::ForAll(vars.clone(), Box::new(self.resolve_expr_types(body))),
+            Expr::Exists(vars, body) => Expr::Exists(vars.clone(), Box::new(self.resolve_expr_types(body))),
+            Expr::StrConcat(args) => Expr::StrConcat(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::StrLen(inner) => Expr::StrLen(Box::new(self.resolve_expr_types(inner))),
+            Expr::StrContains(a, b) => Expr::StrContains(
+                Box::new(self.resolve_expr_types(a)),
+                Box::new(self.resolve_expr_types(b)),
+            ),
+            _ => expr.clone(),
+        }
+    }
+
+    fn infer_type(&self, expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::Var(name, ty) => {
+                if *ty != Type::Unknown {
+                    Some(ty.clone())
+                } else {
+                    self.symbol_table.get(name).cloned()
+                }
+            }
+            Expr::App(name, _) => match self.symbol_table.get(name) {
+                Some(Type::Fn(_, ret)) => Some((**ret).clone()),
+                Some(ty) => Some(ty.clone()),
+                None => {
+                    let ty = expr.get_type();
+                    if ty == Type::Unknown { None } else { Some(ty) }
+                }
+            },
+            _ => {
+                let ty = expr.get_type();
+                if ty == Type::Unknown { None } else { Some(ty) }
+            }
+        }
     }
 
     pub fn get_model(&self) -> BTreeMap<String, ModelValue> {
@@ -200,7 +361,7 @@ impl Rz3Solver {
     }
 
     fn is_bv(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Var(_, crate::ast::Type::BitVec(_)) | Expr::BvConst(_, _) | Expr::BvAdd(_, _) | Expr::BvSub(_, _) | Expr::BvMul(_, _) |
+        matches!(self.infer_type(expr), Some(Type::BitVec(_))) || matches!(expr, Expr::BvConst(_, _) | Expr::BvAdd(_, _) | Expr::BvSub(_, _) | Expr::BvMul(_, _) |
             Expr::BvAnd(_, _) | Expr::BvOr(_, _) | Expr::BvXor(_, _) |
             Expr::BvNot(_) | Expr::BvShl(_, _) | Expr::BvLshr(_, _) |
             Expr::BvAshr(_, _) | Expr::BvExtract(_, _, _) | Expr::BvConcat(_, _))
@@ -287,7 +448,7 @@ impl Rz3Solver {
                     final_clause.push(res_lit);
                     self.sat_solver.add_clause(final_clause);
                     res_lit
-                } else if a.get_type() == Type::Bool {
+                } else if self.infer_type(a) == Some(Type::Bool) {
                     let res_lit = self.get_or_create_lit(expr);
                     let lit_a = self.tseitin(a);
                     let lit_b = self.tseitin(b);
