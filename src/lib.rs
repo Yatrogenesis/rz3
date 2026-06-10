@@ -1,18 +1,20 @@
 pub mod ast;
-pub mod sat;
-pub mod theory;
 pub mod parser;
-pub mod tactic;
 pub mod proof;
+pub mod sat;
+pub mod tactic;
+pub mod theory;
 
+use crate::ast::{Expr, ModelValue, Type};
 use crate::sat::CdclSolver;
-use crate::theory::{LraSolver, EufSolver, TheorySolver, ArraySolver, QuantifierSolver, StringSolver, NlaSolver};
+use crate::tactic::{Simplifier, SolveEqs, TacticEngine};
 use crate::theory::fp::FpSolver;
-use crate::tactic::{Simplifier, TacticEngine, SolveEqs};
-use std::collections::BTreeMap;
-use crate::ast::{Expr, Type, ModelValue};
+use crate::theory::{
+    ArraySolver, EufSolver, LraSolver, NlaSolver, QuantifierSolver, StringSolver, TheorySolver,
+};
 use num_bigint::BigInt;
 use num_rational::BigRational;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverResult {
@@ -129,7 +131,9 @@ impl Rz3Solver {
     fn assert_no_track(&mut self, expr: &Expr) {
         let typed = self.resolve_expr_types(expr);
         let simplified = self.tactic_engine.apply(typed);
-        if let Expr::Bool(true) = simplified { return; }
+        if let Expr::Bool(true) = simplified {
+            return;
+        }
         if let Expr::Bool(false) = simplified {
             self.sat_solver.ok = false;
             return;
@@ -161,7 +165,11 @@ impl Rz3Solver {
     fn resolve_expr_types(&self, expr: &Expr) -> Expr {
         match expr {
             Expr::Var(name, _) => {
-                let ty = self.symbol_table.get(name).cloned().unwrap_or_else(|| expr.get_type());
+                let ty = self
+                    .symbol_table
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| expr.get_type());
                 Expr::Var(name.clone(), ty)
             }
             Expr::And(args) => Expr::And(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
@@ -203,9 +211,10 @@ impl Rz3Solver {
                 Box::new(self.resolve_expr_types(a)),
                 Box::new(self.resolve_expr_types(b)),
             ),
-            Expr::App(name, args) => {
-                Expr::App(name.clone(), args.iter().map(|a| self.resolve_expr_types(a)).collect())
-            }
+            Expr::App(name, args) => Expr::App(
+                name.clone(),
+                args.iter().map(|a| self.resolve_expr_types(a)).collect(),
+            ),
             Expr::BvAdd(a, b) => Expr::BvAdd(
                 Box::new(self.resolve_expr_types(a)),
                 Box::new(self.resolve_expr_types(b)),
@@ -259,7 +268,9 @@ impl Rz3Solver {
                 Box::new(self.resolve_expr_types(a)),
                 Box::new(self.resolve_expr_types(b)),
             ),
-            Expr::BvExtract(h, l, inner) => Expr::BvExtract(*h, *l, Box::new(self.resolve_expr_types(inner))),
+            Expr::BvExtract(h, l, inner) => {
+                Expr::BvExtract(*h, *l, Box::new(self.resolve_expr_types(inner)))
+            }
             Expr::BvConcat(a, b) => Expr::BvConcat(
                 Box::new(self.resolve_expr_types(a)),
                 Box::new(self.resolve_expr_types(b)),
@@ -273,9 +284,15 @@ impl Rz3Solver {
                 Box::new(self.resolve_expr_types(i)),
                 Box::new(self.resolve_expr_types(v)),
             ),
-            Expr::ForAll(vars, body) => Expr::ForAll(vars.clone(), Box::new(self.resolve_expr_types(body))),
-            Expr::Exists(vars, body) => Expr::Exists(vars.clone(), Box::new(self.resolve_expr_types(body))),
-            Expr::StrConcat(args) => Expr::StrConcat(args.iter().map(|a| self.resolve_expr_types(a)).collect()),
+            Expr::ForAll(vars, body) => {
+                Expr::ForAll(vars.clone(), Box::new(self.resolve_expr_types(body)))
+            }
+            Expr::Exists(vars, body) => {
+                Expr::Exists(vars.clone(), Box::new(self.resolve_expr_types(body)))
+            }
+            Expr::StrConcat(args) => {
+                Expr::StrConcat(args.iter().map(|a| self.resolve_expr_types(a)).collect())
+            }
             Expr::StrLen(inner) => Expr::StrLen(Box::new(self.resolve_expr_types(inner))),
             Expr::StrContains(a, b) => Expr::StrContains(
                 Box::new(self.resolve_expr_types(a)),
@@ -299,12 +316,20 @@ impl Rz3Solver {
                 Some(ty) => Some(ty.clone()),
                 None => {
                     let ty = expr.get_type();
-                    if ty == Type::Unknown { None } else { Some(ty) }
+                    if ty == Type::Unknown {
+                        None
+                    } else {
+                        Some(ty)
+                    }
                 }
             },
             _ => {
                 let ty = expr.get_type();
-                if ty == Type::Unknown { None } else { Some(ty) }
+                if ty == Type::Unknown {
+                    None
+                } else {
+                    Some(ty)
+                }
             }
         }
     }
@@ -315,7 +340,10 @@ impl Rz3Solver {
         // Bool variables from SAT assignments
         for (expr, &lit) in &self.expr_to_lit {
             if let Expr::Var(name, ty) = expr {
-                let val = matches!(self.sat_solver.get_lit_value(lit), crate::sat::Assignment::True);
+                let val = matches!(
+                    self.sat_solver.get_lit_value(lit),
+                    crate::sat::Assignment::True
+                );
                 let mv = match ty {
                     crate::ast::Type::Bool => ModelValue::Bool(val),
                     _ => continue,
@@ -330,7 +358,9 @@ impl Rz3Solver {
                 crate::sat::Assignment::True => 1u64,
                 _ => 0u64,
             };
-            let entry = model.entry(name.clone()).or_insert(ModelValue::BitVec(0, 0));
+            let entry = model
+                .entry(name.clone())
+                .or_insert(ModelValue::BitVec(0, 0));
             if let ModelValue::BitVec(curr, width) = entry {
                 *curr |= val << bit;
                 *width = (*width).max(bit + 1);
@@ -339,12 +369,12 @@ impl Rz3Solver {
 
         // Real/Int variables from LRA simplex assignments
         for (name, val) in self.lra.get_all_assignments() {
-            model.entry(name.clone()).or_insert_with(|| {
-                match self.symbol_table.get(&name) {
+            model
+                .entry(name.clone())
+                .or_insert_with(|| match self.symbol_table.get(&name) {
                     Some(crate::ast::Type::Int) => ModelValue::Int(val.to_integer()),
                     _ => ModelValue::Real(val),
-                }
-            });
+                });
         }
 
         model
@@ -358,7 +388,8 @@ impl Rz3Solver {
         if let Expr::Var(name, _) = &typed {
             return self.get_model().get(name).cloned();
         }
-        self.fp.get_model_value(&typed)
+        self.fp
+            .get_model_value(&typed)
             .or_else(|| self.lra.get_model_value(&typed))
             .or_else(|| self.euf.get_model_value(&typed))
             .or_else(|| self.array.get_model_value(&typed))
@@ -396,10 +427,23 @@ impl Rz3Solver {
     }
 
     fn is_bv(&self, expr: &Expr) -> bool {
-        matches!(self.infer_type(expr), Some(Type::BitVec(_))) || matches!(expr, Expr::BvConst(_, _) | Expr::BvAdd(_, _) | Expr::BvSub(_, _) | Expr::BvMul(_, _) |
-            Expr::BvAnd(_, _) | Expr::BvOr(_, _) | Expr::BvXor(_, _) |
-            Expr::BvNot(_) | Expr::BvShl(_, _) | Expr::BvLshr(_, _) |
-            Expr::BvAshr(_, _) | Expr::BvExtract(_, _, _) | Expr::BvConcat(_, _))
+        matches!(self.infer_type(expr), Some(Type::BitVec(_)))
+            || matches!(
+                expr,
+                Expr::BvConst(_, _)
+                    | Expr::BvAdd(_, _)
+                    | Expr::BvSub(_, _)
+                    | Expr::BvMul(_, _)
+                    | Expr::BvAnd(_, _)
+                    | Expr::BvOr(_, _)
+                    | Expr::BvXor(_, _)
+                    | Expr::BvNot(_)
+                    | Expr::BvShl(_, _)
+                    | Expr::BvLshr(_, _)
+                    | Expr::BvAshr(_, _)
+                    | Expr::BvExtract(_, _, _)
+                    | Expr::BvConcat(_, _)
+            )
     }
 
     pub fn assert(&mut self, expr: &Expr) {
@@ -409,7 +453,9 @@ impl Rz3Solver {
 
     fn tseitin(&mut self, expr: &Expr) -> i32 {
         match expr {
-            Expr::ForAll(_, _) | Expr::Select(_, _) | Expr::Store(_, _, _) => self.get_or_create_lit(expr),
+            Expr::ForAll(_, _) | Expr::Select(_, _) | Expr::Store(_, _, _) => {
+                self.get_or_create_lit(expr)
+            }
             Expr::Bool(true) => {
                 let lit = self.get_or_create_lit(expr);
                 self.sat_solver.add_clause(vec![lit]);
@@ -450,9 +496,7 @@ impl Rz3Solver {
                 let not_a_or_b = Expr::Or(vec![Expr::Not(a.clone()), *b.clone()]);
                 self.tseitin(&not_a_or_b)
             }
-            Expr::Lt(_a, _b) | Expr::Gt(_a, _b) => {
-                self.get_or_create_lit(expr)
-            }
+            Expr::Lt(_a, _b) | Expr::Gt(_a, _b) => self.get_or_create_lit(expr),
             Expr::Eq(a, b) => {
                 if self.is_bv(a) || self.is_bv(b) {
                     let mut blaster = crate::theory::bv::BitBlaster::new(
@@ -464,7 +508,7 @@ impl Rz3Solver {
                     let bits_a = blaster.bit_blast(a);
                     let bits_b = blaster.bit_blast(b);
                     let res_lit = self.get_or_create_lit(expr);
-                    
+
                     let mut bit_eqs = Vec::new();
                     for (la, lb) in bits_a.into_iter().zip(bits_b) {
                         let eq = self.next_sat_var;
@@ -475,7 +519,7 @@ impl Rz3Solver {
                         self.sat_solver.add_clause(vec![-la, -lb, eq]);
                         bit_eqs.push(eq);
                     }
-                    
+
                     for &eq in &bit_eqs {
                         self.sat_solver.add_clause(vec![-res_lit, eq]);
                     }
@@ -496,9 +540,7 @@ impl Rz3Solver {
                     self.get_or_create_lit(expr)
                 }
             }
-            _ => {
-                self.get_or_create_lit(expr)
-            }
+            _ => self.get_or_create_lit(expr),
         }
     }
 
@@ -515,24 +557,36 @@ impl Rz3Solver {
             self.string.reset();
             self.nla.reset();
             self.fp.reset();
-            
-            for (expr, &lit) in &self.expr_to_lit {
-                let assign = self.sat_solver.get_lit_value(lit);
-                let atom = match assign {
-                    crate::sat::Assignment::True => Some(expr.clone()),
-                    crate::sat::Assignment::False => Some(Expr::Not(Box::new(expr.clone()))),
-                    _ => None,
-                };
 
-                if let Some(a) = atom {
-                    self.lra.assert(&a);
+            let assigned_atoms = self
+                .expr_to_lit
+                .iter()
+                .filter_map(|(expr, &lit)| match self.sat_solver.get_lit_value(lit) {
+                    crate::sat::Assignment::True => Some((expr.clone(), true)),
+                    crate::sat::Assignment::False => Some((expr.clone(), false)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            for (expr, is_true) in assigned_atoms {
+                let a = if is_true {
+                    expr.clone()
+                } else {
+                    Expr::Not(Box::new(expr.clone()))
+                };
+                let euf_a = self.euf_assignment_assertion(&expr, is_true);
+
+                self.lra.assert(&a);
+                if let Some(euf_expr) = euf_a {
+                    self.euf.assert(&euf_expr);
+                } else {
                     self.euf.assert(&a);
-                    self.array.assert(&a);
-                    self.quant.assert(&a);
-                    self.string.assert(&a);
-                    self.nla.assert(&a);
-                    self.fp.assert(&a);
                 }
+                self.array.assert(&a);
+                self.quant.assert(&a);
+                self.string.assert(&a);
+                self.nla.assert(&a);
+                self.fp.assert(&a);
             }
 
             let lra_ok = self.lra.check();
@@ -553,9 +607,11 @@ impl Rz3Solver {
                 if array_lemmas.is_empty() && quant_lemmas.is_empty() && string_lemmas.is_empty() {
                     return SolverResult::Sat;
                 } else {
-                    for lemma in array_lemmas.into_iter()
+                    for lemma in array_lemmas
+                        .into_iter()
                         .chain(quant_lemmas)
-                        .chain(string_lemmas) {
+                        .chain(string_lemmas)
+                    {
                         self.assert(&lemma);
                     }
                     continue;
@@ -565,7 +621,11 @@ impl Rz3Solver {
                 if !lra_ok {
                     let conflict = self.lra.explain();
                     if !conflict.is_empty() {
-                        self.proof_gen.add_step(crate::proof::ProofStep::TheoryLemma(conflict.clone(), "LRA".to_string()));
+                        self.proof_gen
+                            .add_step(crate::proof::ProofStep::TheoryLemma(
+                                conflict.clone(),
+                                "LRA".to_string(),
+                            ));
                         self.learn_conflict(&conflict);
                         explanation_found = true;
                     }
@@ -573,7 +633,11 @@ impl Rz3Solver {
                 if !euf_ok {
                     let conflict = self.euf.explain();
                     if !conflict.is_empty() {
-                        self.proof_gen.add_step(crate::proof::ProofStep::TheoryLemma(conflict.clone(), "EUF".to_string()));
+                        self.proof_gen
+                            .add_step(crate::proof::ProofStep::TheoryLemma(
+                                conflict.clone(),
+                                "EUF".to_string(),
+                            ));
                         self.learn_conflict(&conflict);
                         explanation_found = true;
                     }
@@ -581,7 +645,11 @@ impl Rz3Solver {
                 if !nla_ok {
                     let conflict = self.nla.explain();
                     if !conflict.is_empty() {
-                        self.proof_gen.add_step(crate::proof::ProofStep::TheoryLemma(conflict.clone(), "NLA".to_string()));
+                        self.proof_gen
+                            .add_step(crate::proof::ProofStep::TheoryLemma(
+                                conflict.clone(),
+                                "NLA".to_string(),
+                            ));
                         self.learn_conflict(&conflict);
                         explanation_found = true;
                     }
@@ -589,7 +657,11 @@ impl Rz3Solver {
                 if !fp_ok {
                     let conflict = self.fp.explain();
                     if !conflict.is_empty() {
-                        self.proof_gen.add_step(crate::proof::ProofStep::TheoryLemma(conflict.clone(), "FP".to_string()));
+                        self.proof_gen
+                            .add_step(crate::proof::ProofStep::TheoryLemma(
+                                conflict.clone(),
+                                "FP".to_string(),
+                            ));
                         self.learn_conflict(&conflict);
                         explanation_found = true;
                     }
@@ -598,12 +670,12 @@ impl Rz3Solver {
                 if !explanation_found {
                     let mut clause = Vec::new();
                     for &lit in self.expr_to_lit.values() {
-                         let val = self.sat_solver.get_lit_value(lit);
-                         if val == crate::sat::Assignment::True {
-                             clause.push(-lit);
-                         } else if val == crate::sat::Assignment::False {
-                             clause.push(lit);
-                         }
+                        let val = self.sat_solver.get_lit_value(lit);
+                        if val == crate::sat::Assignment::True {
+                            clause.push(-lit);
+                        } else if val == crate::sat::Assignment::False {
+                            clause.push(lit);
+                        }
                     }
                     if !clause.is_empty() {
                         let _ = self.sat_solver.add_clause(clause);
@@ -615,8 +687,19 @@ impl Rz3Solver {
         }
     }
 
+    fn euf_assignment_assertion(&self, expr: &Expr, is_true: bool) -> Option<Expr> {
+        match expr {
+            Expr::Var(_, _) | Expr::App(_, _) if self.infer_type(expr) == Some(Type::Bool) => Some(
+                Expr::Eq(Box::new(expr.clone()), Box::new(Expr::Bool(is_true))),
+            ),
+            _ => None,
+        }
+    }
+
     fn learn_conflict(&mut self, conflict: &[Expr]) {
-        if conflict.is_empty() { return; }
+        if conflict.is_empty() {
+            return;
+        }
         let mut clause = Vec::new();
         for expr in conflict {
             if let Some(&lit) = self.expr_to_lit.get(expr) {

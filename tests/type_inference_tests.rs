@@ -11,7 +11,28 @@ fn unknown_application_does_not_default_to_int() {
 #[test]
 fn declare_fun_with_params_records_function_type() {
     let mut parser = Parser::new("(declare-fun f ((x Real) (y Int)) Bool)");
-    let command = parser.parse_command().unwrap();
+    let Some(command) = parser.parse_command() else {
+        panic!("expected declare-fun command");
+    };
+    match command {
+        Command::DeclareFun(name, params, ret) => {
+            assert_eq!(name, "f");
+            assert_eq!(params, vec![Type::Real, Type::Int]);
+            assert_eq!(ret, Type::Bool);
+        }
+        other => assert!(
+            matches!(other, Command::DeclareFun(_, _, _)),
+            "expected declare-fun"
+        ),
+    }
+}
+
+#[test]
+fn declare_fun_with_standard_smtlib_param_sorts_records_function_type() {
+    let mut parser = Parser::new("(declare-fun f (Real Int) Bool)");
+    let Some(command) = parser.parse_command() else {
+        panic!("expected declare-fun command");
+    };
     match command {
         Command::DeclareFun(name, params, ret) => {
             assert_eq!(name, "f");
@@ -28,7 +49,9 @@ fn declare_fun_with_params_records_function_type() {
 #[test]
 fn declare_fun_bitvec_sort_does_not_consume_next_command() {
     let mut parser = Parser::new("(declare-fun x () (_ BitVec 8))");
-    let command = parser.parse_command().unwrap();
+    let Some(command) = parser.parse_command() else {
+        panic!("expected declare-fun command");
+    };
     match command {
         Command::DeclareFun(name, params, Type::BitVec(width)) => {
             assert_eq!(name, "x");
@@ -45,7 +68,9 @@ fn declare_fun_bitvec_sort_does_not_consume_next_command() {
 #[test]
 fn declared_bitvec_symbol_is_used_for_parsed_assertions() {
     let mut parser = Parser::new("(= x #b00000001)");
-    let expr = parser.parse_expr().unwrap();
+    let Some(expr) = parser.parse_expr() else {
+        panic!("expected parsed bit-vector equality");
+    };
 
     let mut solver = Rz3Solver::new();
     solver.declare_fun_signature("x".to_string(), Vec::new(), Type::BitVec(8));
