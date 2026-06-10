@@ -1,1 +1,4 @@
 /target
+.codex_target/
+.codex_tmp/
+.codex_*
