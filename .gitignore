@@ -2,3 +2,7 @@
 .codex_target/
 .codex_tmp/
 .codex_*
+
+# release/zenodo archives (never package these)
+*.zip
+*.tar.gz
