@@ -1,0 +1,22 @@
+{
+  "upload_type": "software",
+  "title": "rz3: a deterministic, exact-rational SMT solver in pure Rust",
+  "creators": [
+    {
+      "name": "Molina-Burgos, Francisco",
+      "orcid": "0009-0008-6093-8267"
+    }
+  ],
+  "license": "Apache-2.0",
+  "access_right": "open",
+  "description": "rz3 is a pure-Rust SMT (Satisfiability Modulo Theories) solver built on a DPLL(T)/CDCL architecture. It computes over arbitrary-precision rationals (no floating-point in the decision core), is deterministic run-to-run (verified by an n=30 bit-identical harness), and has zero native dependencies, so it deploys to WebAssembly. Its linear-arithmetic core is complete and unconditionally terminating: strict inequalities use a symbolic delta-infinitesimal (Dutertre-de Moura) and the feasibility Simplex avoids cycling via a lexicographic epsilon-perturbation. Dual-licensed under MIT OR Apache-2.0.",
+  "keywords": [
+    "SMT solver",
+    "satisfiability modulo theories",
+    "exact arithmetic",
+    "deterministic",
+    "DPLL(T)",
+    "Rust",
+    "WebAssembly"
+  ]
+}

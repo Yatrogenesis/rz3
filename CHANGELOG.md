@@ -3,11 +3,13 @@
 All notable changes to `rz3` are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project follows semantic versioning.
 
-## [0.1.1] — 2026-06-14
+## [0.1.2] — 2026-06-14
 
-First public release. (Supersedes the never-published 0.1.0 tag, which carried an
-invalid `CITATION.cff` license field — an SPDX *expression* instead of an SPDX
-*identifier list* — that broke the Zenodo archival step. No solver code changed.)
+First public release. (Supersedes the never-published 0.1.0/0.1.1 tags. Zenodo
+archival kept failing to load `CITATION.cff` because its `license` field is
+multi-valued — Zenodo's deposition metadata expects a single license, so neither
+the SPDX expression nor the SPDX list parsed. Switched to a native `.zenodo.json`
+with a single-string license, which takes precedence over CFF. No solver code changed.)
 
 ### Solver
 - DPLL(T) architecture: a deterministic CDCL SAT core driving a set of theory solvers.
