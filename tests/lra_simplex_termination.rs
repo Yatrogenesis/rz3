@@ -51,7 +51,7 @@ fn pinned_equality_with_disequality_still_unsat() {
 
 // ─────────────────── Fuzz: no small LRA system returns Unknown ───────────────────
 
-// Deterministic LCG (seeded) — r-z3 forbids unseeded rand; the test owns its randomness.
+// Deterministic LCG (seeded) — rz3 forbids unseeded rand; the test owns its randomness.
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); self.0 >> 33 }

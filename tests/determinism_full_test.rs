@@ -1,6 +1,6 @@
 // Fase 0 — Arnés de determinismo de extremo a extremo (solver completo).
 //
-// Mandato (Frank): r-z3 debe ser 100% determinista. Tras la Fase 1
+// Mandato (Frank): rz3 debe ser 100% determinista. Tras la Fase 1
 // (mapas/conjuntos no ordenados -> BTreeMap/BTreeSet) la iteración ya no depende del
 // seed aleatorio de SipHash. Este arnés lo VERIFICA: corre cada consulta
 // N veces en instancias frescas y exige que el resultado (Sat/Unsat) y el

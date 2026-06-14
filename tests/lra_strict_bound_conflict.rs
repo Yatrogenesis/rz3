@@ -7,7 +7,7 @@
 // slacks and exhausted its pivot budget, returning `Unknown` instead of `Unsat`
 // (surfaced first through lpm-rz3's smoke tests). `detect_row_bound_conflict` now
 // catches the same-form contradiction up front. These tests pin the verdict at the
-// solver level so future regressions are isolated to r-z3, not the bridge.
+// solver level so future regressions are isolated to rz3, not the bridge.
 
 use rz3::Rz3Solver;
 use rz3::ast::{Expr, Type};

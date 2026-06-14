@@ -418,7 +418,7 @@ impl LraSolver {
     /// cycle iff it has ≥1 strict edge — `x≥y ∧ y≥z ∧ z≥x` (all non-strict) stays SAT.
     /// Rows that are NOT differences (sums like `x+y`, ≥3 vars, mismatched coefficients)
     /// are skipped — never turned into edges — so this can only ever report a genuine
-    /// negative cycle (sound: no false UNSAT). Self-contained Bellman-Ford keeps r-z3's
+    /// negative cycle (sound: no false UNSAT). Self-contained Bellman-Ford keeps rz3's
     /// zero-extra-dependency / WASM-lean property.
     fn detect_difference_logic_conflict(&mut self) -> bool {
         const ZERO: usize = usize::MAX; // node representing the constant 0
