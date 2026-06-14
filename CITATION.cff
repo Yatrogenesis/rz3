@@ -6,7 +6,7 @@ authors:
     given-names: "Francisco"
     email: "pako.molina@gmail.com"
     orcid: "https://orcid.org/0009-0008-6093-8267"
-version: "0.1.0"
+version: "0.1.1"
 license:
   - MIT
   - Apache-2.0

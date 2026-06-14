@@ -3,9 +3,11 @@
 All notable changes to `rz3` are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project follows semantic versioning.
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-06-14
 
-First public release.
+First public release. (Supersedes the never-published 0.1.0 tag, which carried an
+invalid `CITATION.cff` license field — an SPDX *expression* instead of an SPDX
+*identifier list* — that broke the Zenodo archival step. No solver code changed.)
 
 ### Solver
 - DPLL(T) architecture: a deterministic CDCL SAT core driving a set of theory solvers.

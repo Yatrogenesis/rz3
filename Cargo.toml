@@ -1,6 +1,6 @@
 [package]
 name = "rz3"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Francisco Molina-Burgos <pako.molina@gmail.com>"]
 description = "Deterministic, exact-rational SMT solver in pure Rust (DPLL(T)/CDCL) with a complete linear-arithmetic core. Zero C dependencies, WASM-deployable, reproducible run-to-run."
