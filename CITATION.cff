@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use rz3 in your research, please cite it as below."
+title: "rz3: a deterministic, exact-rational SMT solver in pure Rust"
+authors:
+  - family-names: "Molina-Burgos"
+    given-names: "Francisco"
+    orcid: "https://orcid.org/0009-0008-6093-8267"
+version: "0.1.2"
+date-released: "2026-06-14"
+license: Apache-2.0
+repository-code: "https://github.com/Yatrogenesis/rz3"
+doi: "10.5281/zenodo.20686622"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.20686622"
+    description: "Concept DOI (all versions)"
+  - type: doi
+    value: "10.5281/zenodo.20686623"
+    description: "Version DOI (v0.1.2)"
+keywords:
+  - "SMT solver"
+  - "satisfiability modulo theories"
+  - "exact arithmetic"
+  - "deterministic"
+  - "DPLL(T)"
+  - "Rust"
+  - "WebAssembly"
