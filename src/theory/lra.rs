@@ -30,55 +30,97 @@ pub struct Bound {
 ///      DOI: 10.1007/11817963_11
 ///      Peer-reviewed: [Computer Aided Verification (CAV), ISSN: 0302-9743]
 ///      Validado contra: oráculos LRA de desigualdad y cotas estrictas estrechas.
+/// Value in the ordered field ℚ(δ, ε): `c + kδ + Σ eps[i]·εᵢ`, where `1 ≫ δ ≫ ε₁ ≫ ε₂ ≫ …`
+/// are independent positive infinitesimals. `δ` encodes strict inequalities (Dutertre–de
+/// Moura). The `ε` layer is a **lexicographic perturbation by variable index** that breaks the
+/// δ-pure degeneracy on which Bland's rule alone cycles (e.g. `x>y ∧ y>z ∧ z>x`), making the
+/// feasibility Simplex terminate unconditionally. `eps` empty ⇒ identical to the old `c + kδ`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeltaRational {
     c: Rational,
     k: Rational,
+    eps: BTreeMap<usize, Rational>,
 }
 
 impl DeltaRational {
     fn rational(c: Rational) -> Self {
-        Self { c, k: rat(0, 1) }
-    }
-
-    fn delta_shift(c: Rational, k: i64) -> Self {
-        Self { c, k: int_rat(k) }
+        Self { c, k: rat(0, 1), eps: BTreeMap::new() }
     }
 
     fn zero() -> Self {
         Self::rational(rat(0, 1))
     }
 
+    /// `c + kδ + coef·ε_idx` — a single lexicographic perturbation on level `idx`.
+    fn with_perturbation(c: Rational, k: i64, idx: usize, coef: Rational) -> Self {
+        let mut eps = BTreeMap::new();
+        if coef != rat(0, 1) { eps.insert(idx, coef); }
+        Self { c, k: int_rat(k), eps }
+    }
+
     fn add(&self, rhs: &Self) -> Self {
-        Self { c: self.c.clone() + rhs.c.clone(), k: self.k.clone() + rhs.k.clone() }
+        let mut eps = self.eps.clone();
+        for (i, v) in &rhs.eps {
+            let e = eps.entry(*i).or_insert_with(|| rat(0, 1));
+            *e += v.clone();
+            if *e == rat(0, 1) { eps.remove(i); }
+        }
+        Self { c: self.c.clone() + rhs.c.clone(), k: self.k.clone() + rhs.k.clone(), eps }
     }
 
     fn sub(&self, rhs: &Self) -> Self {
-        Self { c: self.c.clone() - rhs.c.clone(), k: self.k.clone() - rhs.k.clone() }
+        let mut eps = self.eps.clone();
+        for (i, v) in &rhs.eps {
+            let e = eps.entry(*i).or_insert_with(|| rat(0, 1));
+            *e -= v.clone();
+            if *e == rat(0, 1) { eps.remove(i); }
+        }
+        Self { c: self.c.clone() - rhs.c.clone(), k: self.k.clone() - rhs.k.clone(), eps }
     }
 
     fn scale(&self, a: Rational) -> Self {
-        Self { c: self.c.clone() * a.clone(), k: self.k.clone() * a }
+        if a == rat(0, 1) { return Self::zero(); }
+        let eps = self.eps.iter().map(|(i, v)| (*i, v.clone() * a.clone())).collect();
+        Self { c: self.c.clone() * a.clone(), k: self.k.clone() * a, eps }
+    }
+
+    /// Total lexicographic order: `c`, then `kδ`, then `εᵢ` by ascending index (ε₁ dominates ε₂…).
+    fn cmp_lex(&self, rhs: &Self) -> core::cmp::Ordering {
+        use core::cmp::Ordering;
+        match self.c.cmp(&rhs.c) {
+            Ordering::Equal => match self.k.cmp(&rhs.k) {
+                Ordering::Equal => {
+                    let zero = rat(0, 1);
+                    // union of indices, ascending (BTreeMap keys are sorted)
+                    let mut idxs: Vec<usize> = self.eps.keys().chain(rhs.eps.keys()).cloned().collect();
+                    idxs.sort_unstable();
+                    idxs.dedup();
+                    for i in idxs {
+                        let a = self.eps.get(&i).unwrap_or(&zero);
+                        let b = rhs.eps.get(&i).unwrap_or(&zero);
+                        match a.cmp(b) {
+                            Ordering::Equal => continue,
+                            ord => return ord,
+                        }
+                    }
+                    Ordering::Equal
+                }
+                ord => ord,
+            },
+            ord => ord,
+        }
     }
 
     fn lt_rational(&self, rhs: Rational) -> bool {
-        self.c < rhs || (self.c == rhs && self.k < rat(0, 1))
+        self.cmp_lex(&DeltaRational::rational(rhs)) == core::cmp::Ordering::Less
     }
 
     fn le_rational(&self, rhs: Rational) -> bool {
-        self.c < rhs || (self.c == rhs && self.k <= rat(0, 1))
-    }
-
-    fn gt_rational(&self, rhs: Rational) -> bool {
-        self.c > rhs || (self.c == rhs && self.k > rat(0, 1))
-    }
-
-    fn ge_rational(&self, rhs: Rational) -> bool {
-        self.c > rhs || (self.c == rhs && self.k >= rat(0, 1))
+        self.cmp_lex(&DeltaRational::rational(rhs)) != core::cmp::Ordering::Greater
     }
 
     fn lt_delta(&self, rhs: &Self) -> bool {
-        self.c < rhs.c || (self.c == rhs.c && self.k < rhs.k)
+        self.cmp_lex(rhs) == core::cmp::Ordering::Less
     }
 
     fn min_delta(self, rhs: Self) -> Self {
@@ -86,11 +128,17 @@ impl DeltaRational {
     }
 
     fn is_positive(&self) -> bool {
-        self.c > rat(0, 1) || (self.c == rat(0, 1) && self.k > rat(0, 1))
+        self.cmp_lex(&DeltaRational::zero()) == core::cmp::Ordering::Greater
     }
 
     fn is_zero(&self) -> bool {
-        self.c == rat(0, 1) && self.k == rat(0, 1)
+        self.c == rat(0, 1) && self.k == rat(0, 1) && self.eps.is_empty()
+    }
+
+    /// Drop the ε-perturbation, keeping the real value `c + kδ`. Used where the lexicographic
+    /// tie-breaker must not leak into a real-value decision (e.g. disequality `≠` checks).
+    fn real_part(&self) -> Self {
+        Self { c: self.c.clone(), k: self.k.clone(), eps: BTreeMap::new() }
     }
 }
 
@@ -141,6 +189,9 @@ pub struct LraSolver {
     disequality_freeze_origins: Vec<Expr>,
     /// Pivot limit exceeded — result is Unknown, not Unsat
     is_unknown: bool,
+    /// Origins of a same-linear-form bound conflict detected before the Simplex runs
+    /// (see `detect_row_bound_conflict`). Non-empty ⇒ genuine UNSAT with these origins.
+    bound_conflict: Vec<Expr>,
 }
 
 impl Default for LraSolver {
@@ -166,6 +217,7 @@ impl LraSolver {
             disequality_conflict: None,
             disequality_freeze_origins: Vec::new(),
             is_unknown: false,
+            bound_conflict: Vec::new(),
         }
     }
 
@@ -184,6 +236,7 @@ impl LraSolver {
         self.disequality_conflict = None;
         self.disequality_freeze_origins.clear();
         self.is_unknown = false;
+        self.bound_conflict.clear();
     }
 
     pub fn is_unknown(&self) -> bool {
@@ -273,7 +326,223 @@ impl LraSolver {
         }
     }
 
+    /// Sound, additive pre-Simplex check: detect UNSAT arising from two bounds on the
+    /// SAME linear form (up to a positive scalar / sign) being contradictory — including
+    /// the strict-equality case `lower == upper ∧ (lower.strict ∨ upper.strict)`.
+    ///
+    /// Each asserted constraint gets a FRESH slack (`create_slack_var`), so e.g. `x>0`
+    /// and `x<0` produce two distinct slacks over the row `{x:1}` carrying `lower 0
+    /// (strict)` and `upper 0 (strict)`. The feasibility Simplex then oscillates between
+    /// those slacks (a state de Moura's invariants exclude, because it never duplicates a
+    /// linear form) and exhausts its pivot budget → `Unknown` instead of `Unsat`.
+    ///
+    /// To catch this regardless of scaling or orientation, each slack's row is reduced to
+    /// a CANONICAL form: divide by the leading (lowest-index) coefficient so the leading
+    /// coefficient becomes 1. Dividing by a NEGATIVE leading coefficient flips the
+    /// inequality, so the bound is mapped lower↔upper, value scaled, strictness preserved
+    /// (`y−x > 0` ≡ `x−y < 0`). Rows that are positive/negative scalar multiples of each
+    /// other thus collapse to the same key, and `2x>0 ∧ x<0` or `x>y ∧ y>x` become
+    /// immediate, sound conflicts. Genuinely multi-row infeasibilities (e.g. the Farkas
+    /// cycle `x>y ∧ y>z ∧ z>x`) are NOT same-form and fall through to the Simplex (→ sound
+    /// `Unknown`); this check never emits a wrong verdict.
+    fn detect_row_bound_conflict(&mut self) -> bool {
+        // canonical_key → (tightest_lower, tightest_upper); each as (value, strict, slack, orig_is_lower).
+        type B = (Rational, bool, usize, bool);
+        type Tight = (Option<B>, Option<B>);
+        let mut groups: BTreeMap<Vec<(usize, Rational)>, Tight> = BTreeMap::new();
+
+        for (&slack, row) in &self.tableau {
+            let Some((&_lead, lead_coeff)) = row.iter().next() else { continue }; // empty row → skip
+            if *lead_coeff == rat(0, 1) { continue; }
+            let factor = lead_coeff.clone();
+            let flip = factor < rat(0, 1);
+            let key: Vec<(usize, Rational)> =
+                row.iter().map(|(&v, c)| (v, c.clone() / factor.clone())).collect();
+
+            // Map this slack's lower/upper into canonical orientation.
+            // `orig_is_lower` records the original direction for origin lookup.
+            let scale = |b: &Bound| (b.val.clone() / factor.clone(), b.is_strict);
+            let canon_lower: Option<B>; // becomes lower bound of the canonical form
+            let canon_upper: Option<B>;
+            if flip {
+                // dividing by a negative flips direction: original lower → canonical upper
+                canon_upper = self.lower_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, true) });
+                canon_lower = self.upper_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, false) });
+            } else {
+                canon_lower = self.lower_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, true) });
+                canon_upper = self.upper_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, false) });
+            }
+
+            let entry = groups.entry(key).or_insert((None, None));
+            if let Some(cl) = canon_lower {
+                let tighter = match &entry.0 {
+                    None => true,
+                    Some((cv, cs, _, _)) => cl.0 > *cv || (cl.0 == *cv && cl.1 && !*cs),
+                };
+                if tighter { entry.0 = Some(cl); }
+            }
+            if let Some(cu) = canon_upper {
+                let tighter = match &entry.1 {
+                    None => true,
+                    Some((cv, cs, _, _)) => cu.0 < *cv || (cu.0 == *cv && cu.1 && !*cs),
+                };
+                if tighter { entry.1 = Some(cu); }
+            }
+        }
+
+        for (_key, (lo, hi)) in &groups {
+            if let (Some((lv, ls, lslack, lorig)), Some((uv, us, uslack, uorig))) = (lo, hi) {
+                if lv > uv || (lv == uv && (*ls || *us)) {
+                    let mut origins = Vec::new();
+                    if let Some(e) = self.bound_origins.get(&(*lslack, *lorig)) { origins.push(e.clone()); }
+                    if let Some(e) = self.bound_origins.get(&(*uslack, *uorig)) { origins.push(e.clone()); }
+                    self.bound_conflict = origins;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Sound, additive pre-Simplex decision for the **Difference-Logic fragment**:
+    /// constraints of the form `±x ∓ y OP c` (and single-variable bounds `x OP c`).
+    /// Their joint infeasibility is exactly a **negative cycle** in the constraint graph,
+    /// decided here by Bellman-Ford. This is the textbook DL decision procedure and is
+    /// the fragment on which the feasibility Simplex cycles when all variables are free
+    /// (e.g. `x>y ∧ y>z ∧ z>x` — a strict zero cycle the Simplex can't settle → Unknown).
+    ///
+    /// Each qualifying slack contributes one edge per bound (lower/upper). A constraint
+    /// `pos − neg ≥ k` becomes edge `pos → neg` of weight `−k`; `pos − neg ≤ k` becomes
+    /// `neg → pos` of weight `k`; single-variable bounds use a fixed zero node. Strictness
+    /// is carried as a `−δ` term (DeltaRational), so a zero-weight cycle is a negative
+    /// cycle iff it has ≥1 strict edge — `x≥y ∧ y≥z ∧ z≥x` (all non-strict) stays SAT.
+    /// Rows that are NOT differences (sums like `x+y`, ≥3 vars, mismatched coefficients)
+    /// are skipped — never turned into edges — so this can only ever report a genuine
+    /// negative cycle (sound: no false UNSAT). Self-contained Bellman-Ford keeps r-z3's
+    /// zero-extra-dependency / WASM-lean property.
+    fn detect_difference_logic_conflict(&mut self) -> bool {
+        const ZERO: usize = usize::MAX; // node representing the constant 0
+        // edges: (from, to, weight, origin)
+        let mut edges: Vec<(usize, usize, DeltaRational, Expr)> = Vec::new();
+        let mut nodes: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let zero = rat(0, 1);
+
+        for (&slack, row) in &self.tableau {
+            let entries: Vec<(usize, Rational)> = row
+                .iter()
+                .filter(|(_, c)| **c != zero)
+                .map(|(&v, c)| (v, c.clone()))
+                .collect();
+
+            // Reduce the row to `factor * (pos - neg)` with factor > 0, or skip if not DL.
+            let (pos, neg, factor): (usize, usize, Rational) = match entries.as_slice() {
+                [(v, c)] => {
+                    if *c > zero { (*v, ZERO, c.clone()) } else { (ZERO, *v, -c.clone()) }
+                }
+                [(v1, c1), (v2, c2)] if *c1 == -c2.clone() => {
+                    if *c1 > zero { (*v1, *v2, c1.clone()) } else { (*v2, *v1, c2.clone()) }
+                }
+                _ => continue, // not a difference-logic atom
+            };
+
+            // lower l : factor*(pos-neg) ≥ l  →  pos-neg ≥ l/factor  →  edge pos→neg, w = -(l/factor)
+            if let Some(lb) = self.lower_bounds.get(&slack) {
+                if let Some(o) = self.bound_origins.get(&(slack, true)) {
+                    let k = -(lb.val.clone() / factor.clone());
+                    let w = DeltaRational { c: k, k: if lb.is_strict { -rat(1, 1) } else { zero.clone() }, eps: BTreeMap::new() };
+                    edges.push((pos, neg, w, o.clone()));
+                    nodes.insert(pos);
+                    nodes.insert(neg);
+                }
+            }
+            // upper u : factor*(pos-neg) ≤ u  →  pos-neg ≤ u/factor  →  edge neg→pos, w = u/factor
+            if let Some(ub) = self.upper_bounds.get(&slack) {
+                if let Some(o) = self.bound_origins.get(&(slack, false)) {
+                    let k = ub.val.clone() / factor.clone();
+                    let w = DeltaRational { c: k, k: if ub.is_strict { -rat(1, 1) } else { zero.clone() }, eps: BTreeMap::new() };
+                    edges.push((neg, pos, w, o.clone()));
+                    nodes.insert(neg);
+                    nodes.insert(pos);
+                }
+            }
+        }
+
+        if edges.is_empty() {
+            return false;
+        }
+
+        // Bellman-Ford with a virtual source (all distances init 0) to find any negative
+        // cycle. With `n` nodes, a cycle-free graph settles in ≤ n-1 passes; if pass `n`
+        // still relaxes, a negative cycle exists.
+        let n = nodes.len();
+        let mut dist: BTreeMap<usize, DeltaRational> =
+            nodes.iter().map(|&v| (v, DeltaRational::zero())).collect();
+        let mut pred: BTreeMap<usize, (usize, usize)> = BTreeMap::new(); // node → (pred, edge_idx)
+        let mut last_relaxed: Option<usize> = None;
+
+        for _ in 0..n {
+            let mut relaxed_this_pass = false;
+            for (idx, (u, v, w, _)) in edges.iter().enumerate() {
+                let cand = dist[u].add(w);
+                if cand.lt_delta(&dist[v]) {
+                    dist.insert(*v, cand);
+                    pred.insert(*v, (*u, idx));
+                    relaxed_this_pass = true;
+                    last_relaxed = Some(*v);
+                }
+            }
+            if !relaxed_this_pass {
+                return false; // settled, no negative cycle
+            }
+        }
+
+        // Negative cycle present. Walk back n steps to land inside it, then collect the
+        // cycle's edge origins (best-effort; the verdict is sound regardless).
+        let Some(mut cur) = last_relaxed else { return false };
+        for _ in 0..n {
+            cur = pred[&cur].0;
+        }
+        let entry = cur;
+        let mut origins = Vec::new();
+        let mut guard = 0;
+        loop {
+            let (p, idx) = pred[&cur];
+            origins.push(edges[idx].3.clone());
+            cur = p;
+            guard += 1;
+            if cur == entry || guard > n {
+                break;
+            }
+        }
+        self.bound_conflict = origins;
+        true
+    }
+
+    /// Lower bound of `v` in ℚ(δ,ε): `l (+δ if strict) − ε_v`. The `−ε_v` is a lexicographic
+    /// perturbation unique to `v`'s index; relaxing every bound by an independent infinitesimal
+    /// `ε ≪ δ` removes the degeneracy that makes the feasibility Simplex cycle, while preserving
+    /// the SAT/UNSAT verdict in the limit `ε→0⁺` (δ dominates ε, so strict-bound conflicts stand).
+    fn perturbed_lower(&self, v: usize) -> Option<DeltaRational> {
+        self.lower_bounds.get(&v).map(|b|
+            DeltaRational::with_perturbation(b.val.clone(), if b.is_strict { 1 } else { 0 }, v, rat(-1, 1)))
+    }
+    /// Upper bound of `v`: `u (−δ if strict) + ε_v` (relaxed upward by the same perturbation).
+    fn perturbed_upper(&self, v: usize) -> Option<DeltaRational> {
+        self.upper_bounds.get(&v).map(|b|
+            DeltaRational::with_perturbation(b.val.clone(), if b.is_strict { -1 } else { 0 }, v, rat(1, 1)))
+    }
+
     pub fn check_feasibility(&mut self) -> bool {
+        // Decide two fragments directly, outside the fragile feasibility Simplex:
+        //   (1) same-linear-form bound conflicts (canonical row), and
+        //   (2) the difference-logic fragment (negative cycle).
+        // Both are sound; the Simplex still handles general multi-row LRA below.
+        if self.detect_row_bound_conflict() {
+            return false;
+        }
+        if self.detect_difference_logic_conflict() {
+            return false;
+        }
         let mut pivots = 0;
         let max_pivots = 2000;
         let mut diseq_repairs = 0usize;
@@ -294,14 +563,16 @@ impl LraSolver {
 
             for &x_i in &basic_vars_sorted {
                 let val = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
-                if let Some(lb) = self.lower_bounds.get(&x_i) {
-                    if (lb.is_strict && val.le_rational(lb.val.clone())) || (!lb.is_strict && val.lt_rational(lb.val.clone())) {
+                // Compare against the lexicographically-perturbed bound (l+δ−ε_i / u−δ+ε_i),
+                // so strict bounds AND the ε-perturbation are honoured in one total order.
+                if let Some(pl) = self.perturbed_lower(x_i) {
+                    if val.cmp_lex(&pl) == core::cmp::Ordering::Less {
                         violated_var = Some((x_i, true));
                         break;
                     }
                 }
-                if let Some(ub) = self.upper_bounds.get(&x_i) {
-                    if (ub.is_strict && val.ge_rational(ub.val.clone())) || (!ub.is_strict && val.gt_rational(ub.val.clone())) {
+                if let Some(pu) = self.perturbed_upper(x_i) {
+                    if val.cmp_lex(&pu) == core::cmp::Ordering::Greater {
                         violated_var = Some((x_i, false));
                         break;
                     }
@@ -315,35 +586,29 @@ impl LraSolver {
                 let mut non_basic_vars = self.non_basic_vars.clone();
                 non_basic_vars.sort_unstable();
 
-                let target_val = if is_lower { 
-                    if self.lower_bounds[&x_i].is_strict {
-                        DeltaRational::delta_shift(self.lower_bounds[&x_i].val.clone(), 1)
-                    } else {
-                        DeltaRational::rational(self.lower_bounds[&x_i].val.clone())
-                    }
-                } else if self.upper_bounds[&x_i].is_strict {
-                    DeltaRational::delta_shift(self.upper_bounds[&x_i].val.clone(), -1)
+                // Move the violated variable exactly to its perturbed bound — this is what
+                // makes each landing point unique and breaks the δ-pure degeneracy.
+                let target_val = if is_lower {
+                    self.perturbed_lower(x_i).unwrap()
                 } else {
-                    DeltaRational::rational(self.upper_bounds[&x_i].val.clone())
+                    self.perturbed_upper(x_i).unwrap()
                 };
 
                 for &x_j in &non_basic_vars {
                     let row = &self.tableau[&x_i];
                     let a_ij = row.get(&x_j).cloned().unwrap_or_else(|| rat(0, 1));
                     if a_ij == rat(0, 1) { continue; }
-                    
+
                     let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
-                    
-                    let can_increase = if let Some(ub) = self.upper_bounds.get(&x_j) {
-                        val_j.lt_rational(ub.val.clone())
+
+                    let can_increase = if let Some(pu) = self.perturbed_upper(x_j) {
+                        val_j.cmp_lex(&pu) == core::cmp::Ordering::Less
                     } else { true };
-                    let can_decrease = if let Some(lb) = self.lower_bounds.get(&x_j) {
-                        val_j.gt_rational(lb.val.clone())
+                    let can_decrease = if let Some(pl) = self.perturbed_lower(x_j) {
+                        val_j.cmp_lex(&pl) == core::cmp::Ordering::Greater
                     } else { true };
 
                     let a_ij_gt_0 = a_ij > rat(0, 1);
-                    
-                    // Comprobar si este pivot mejora la viabilidad
                     let improves = if is_lower {
                         (a_ij_gt_0 && can_increase) || (!a_ij_gt_0 && can_decrease)
                     } else {
@@ -357,9 +622,9 @@ impl LraSolver {
                         break;
                     }
                 }
-                if !found_pivot { 
+                if !found_pivot {
                     self.last_conflict_var = Some(x_i);
-                    return false; 
+                    return false;
                 }
             } else {
                 // Factible respecto a cotas. Revisar desigualdades (≠).
@@ -375,7 +640,11 @@ impl LraSolver {
                         let val = self.assignment.get(&var).cloned().unwrap_or_else(DeltaRational::zero);
                         current_sum = current_sum.add(&val.scale(coeff.clone()));
                     }
-                    if current_sum == DeltaRational::rational(target.clone()) { violated_idx = Some(idx); break; }
+                    // The ε-perturbation is only a tie-breaker for the bounds Simplex; a
+                    // disequality `Σ≠target` is about the REAL value, so compare on the
+                    // `c+kδ` part with ε projected out (otherwise a pinned `x=1` looks like
+                    // `1±ε ≠ 1` and the genuine `x≠1` conflict is missed → false SAT).
+                    if current_sum.real_part() == DeltaRational::rational(target.clone()) { violated_idx = Some(idx); break; }
                 }
                 match violated_idx {
                     None => return true,
@@ -412,30 +681,30 @@ impl LraSolver {
         let zero = rat(0, 1);
         let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
         let mut up: Option<DeltaRational> = self.upper_bounds.get(&x_j)
-            .map(|b| DeltaRational { c: b.val.clone() - val_j.c.clone(), k: -val_j.k.clone() });
+            .map(|b| DeltaRational { c: b.val.clone() - val_j.c.clone(), k: -val_j.k.clone(), eps: BTreeMap::new() });
         let mut down: Option<DeltaRational> = self.lower_bounds.get(&x_j)
-            .map(|b| DeltaRational { c: val_j.c.clone() - b.val.clone(), k: val_j.k.clone() });
+            .map(|b| DeltaRational { c: val_j.c.clone() - b.val.clone(), k: val_j.k.clone(), eps: BTreeMap::new() });
         for (&x_i, row) in self.tableau.iter() {
             let a_ij = match row.get(&x_j) { Some(a) if *a != zero => a.clone(), _ => continue };
             let val_i = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
             // Subir x_j por Δ mueve x_i por a_ij*Δ.
             if a_ij > zero {
                 if let Some(ub) = self.upper_bounds.get(&x_i) {
-                    let room = DeltaRational { c: ub.val.clone() - val_i.c.clone(), k: -val_i.k.clone() }.scale(rat(1, 1) / a_ij.clone());
+                    let room = DeltaRational { c: ub.val.clone() - val_i.c.clone(), k: -val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / a_ij.clone());
                     up = Some(up.map_or(room.clone(), |u| u.min_delta(room)));
                 }
                 if let Some(lb) = self.lower_bounds.get(&x_i) {
-                    let room = DeltaRational { c: val_i.c.clone() - lb.val.clone(), k: val_i.k.clone() }.scale(rat(1, 1) / a_ij.clone());
+                    let room = DeltaRational { c: val_i.c.clone() - lb.val.clone(), k: val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / a_ij.clone());
                     down = Some(down.map_or(room.clone(), |d| d.min_delta(room)));
                 }
             } else {
                 let neg = -a_ij;
                 if let Some(lb) = self.lower_bounds.get(&x_i) {
-                    let room = DeltaRational { c: val_i.c.clone() - lb.val.clone(), k: val_i.k.clone() }.scale(rat(1, 1) / neg.clone());
+                    let room = DeltaRational { c: val_i.c.clone() - lb.val.clone(), k: val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / neg.clone());
                     up = Some(up.map_or(room.clone(), |u| u.min_delta(room)));
                 }
                 if let Some(ub) = self.upper_bounds.get(&x_i) {
-                    let room = DeltaRational { c: ub.val.clone() - val_i.c.clone(), k: -val_i.k.clone() }.scale(rat(1, 1) / neg.clone());
+                    let room = DeltaRational { c: ub.val.clone() - val_i.c.clone(), k: -val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / neg.clone());
                     down = Some(down.map_or(room.clone(), |d| d.min_delta(room)));
                 }
             }
@@ -472,13 +741,13 @@ impl LraSolver {
                     let delta = if can_up {
                         match up.clone() {
                             Some(r) if r.c > zero => DeltaRational::rational(r.c.min(one.clone())),
-                            Some(r) => DeltaRational { c: zero.clone(), k: r.k / rat(2, 1) },
+                            Some(r) => DeltaRational { c: zero.clone(), k: r.k / rat(2, 1), eps: BTreeMap::new() },
                             None => DeltaRational::rational(one.clone()),
                         }
                     } else if can_down {
                         match down.clone() {
                             Some(r) if r.c > zero => DeltaRational::rational(-(r.c.min(one.clone()))),
-                            Some(r) => DeltaRational { c: zero.clone(), k: -(r.k / rat(2, 1)) },
+                            Some(r) => DeltaRational { c: zero.clone(), k: -(r.k / rat(2, 1)), eps: BTreeMap::new() },
                             None => DeltaRational::rational(-one.clone()),
                         }
                     } else { DeltaRational::zero() };
@@ -560,6 +829,11 @@ impl TheorySolver for LraSolver {
     }
 
     fn explain(&self) -> Vec<Expr> {
+        if !self.bound_conflict.is_empty() {
+            // Same-linear-form bound conflict (detect_row_bound_conflict): the two
+            // contradictory bound origins are exactly the unsat core.
+            return self.bound_conflict.clone();
+        }
         if let Some(origin) = &self.disequality_conflict {
             // Origen de la desigualdad + las cotas que congelan sus variables,
             // para que el SAT core aprenda una cláusula útil (no una trivial).
@@ -686,7 +960,11 @@ impl LraSolver {
                 if args.is_empty() { return rat(0, 1); }
                 let mut constant = self.extract_coeffs(&args[0], scale.clone(), coeffs);
                 for arg in &args[1..] {
-                    constant -= self.extract_coeffs(arg, scale.clone(), coeffs);
+                    // Subtrahend must be extracted with NEGATED scale so its *variables*
+                    // get the right sign, not only the returned constant. The previous
+                    // `constant -= extract(arg, scale)` was correct for constants but left
+                    // subtrahend variables with the wrong sign — `x - y` became `x + y`.
+                    constant += self.extract_coeffs(arg, -scale.clone(), coeffs);
                 }
                 constant
             }
