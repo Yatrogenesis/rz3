@@ -9,7 +9,7 @@
   ],
   "license": "Apache-2.0",
   "access_right": "open",
-  "description": "rz3 is a pure-Rust SMT (Satisfiability Modulo Theories) solver built on a DPLL(T)/CDCL architecture. It computes over arbitrary-precision rationals (no floating-point in the decision core), is deterministic run-to-run (verified by an n=30 bit-identical harness), and has zero native dependencies, so it deploys to WebAssembly. Its linear-arithmetic core is complete and unconditionally terminating: strict inequalities use a symbolic delta-infinitesimal (Dutertre-de Moura) and the feasibility Simplex avoids cycling via a lexicographic epsilon-perturbation. Dual-licensed under MIT OR Apache-2.0.",
+  "description": "rz3 is a pure-Rust SMT (Satisfiability Modulo Theories) solver built on a DPLL(T)/CDCL architecture. It computes over arbitrary-precision rationals (no floating-point in the decision core), is deterministic run-to-run (verified by an n=30 bit-identical harness), and has zero native dependencies, so it deploys to WebAssembly. Its linear-arithmetic core uses exact rationals, symbolic strict bounds and deterministic pivoting, with regression coverage for termination-sensitive cases. Some unresolved degenerate or disequality-heavy cases may return Unknown. Dual-licensed under MIT OR Apache-2.0.",
   "keywords": [
     "SMT solver",
     "satisfiability modulo theories",

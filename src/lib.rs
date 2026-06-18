@@ -1,3 +1,32 @@
+//! Deterministic, exact-rational SMT solving in pure Rust.
+//!
+//! `rz3` is a small DPLL(T)/CDCL solver focused on reproducible, embeddable
+//! reasoning without native dependencies. Arithmetic in the linear-arithmetic
+//! core uses arbitrary-precision rationals (`num-rational`/`num-bigint`) and
+//! symbolic strict bounds instead of floating-point approximations.
+//!
+//! The project is intentionally narrower than mature solvers such as Z3. The
+//! LRA/LIA path is the most developed part of the crate, while arrays, EUF,
+//! bit-vectors, strings, floating-point, quantifiers, non-linear arithmetic and
+//! the SMT-LIB front-end are implemented as focused subsets. Some unresolved
+//! cases return [`SolverResult::Unknown`]; callers should handle that result
+//! explicitly.
+//!
+//! # Example
+//!
+//! ```
+//! use rz3::ast::{Expr, Type};
+//! use rz3::{Rz3Solver, SolverResult};
+//!
+//! let mut solver = Rz3Solver::new();
+//! let x = || Expr::Var("x".to_string(), Type::Int);
+//!
+//! solver.assert(&Expr::Gt(Box::new(x()), Box::new(Expr::Int(0))));
+//! solver.assert(&Expr::Lt(Box::new(x()), Box::new(Expr::Int(0))));
+//!
+//! assert_eq!(solver.check(), SolverResult::Unsat);
+//! ```
+//!
 pub mod ast;
 pub mod parser;
 pub mod proof;

@@ -3,23 +3,46 @@ pub mod fp;
 impl Expr {
     pub fn get_type(&self) -> Type {
         match self {
-            Expr::Bool(_) | Expr::And(_) | Expr::Or(_) | Expr::Not(_) | Expr::Implies(_, _) |
-            Expr::Eq(_, _) | Expr::Lt(_, _) | Expr::Le(_, _) | Expr::Gt(_, _) | Expr::Ge(_, _) |
-            Expr::StrContains(_, _) | Expr::BvUle(_, _) | Expr::BvUlt(_, _) | 
-            Expr::BvSle(_, _) | Expr::BvSlt(_, _) | Expr::ForAll(_, _) | Expr::Exists(_, _) => Type::Bool,
-            
-            Expr::Int(_) | Expr::Add(_) | Expr::Sub(_) | Expr::Mul(_) | Expr::Div(_, _) |
-            Expr::StrLen(_) => Type::Int,
-            
+            Expr::Bool(_)
+            | Expr::And(_)
+            | Expr::Or(_)
+            | Expr::Not(_)
+            | Expr::Implies(_, _)
+            | Expr::Eq(_, _)
+            | Expr::Lt(_, _)
+            | Expr::Le(_, _)
+            | Expr::Gt(_, _)
+            | Expr::Ge(_, _)
+            | Expr::StrContains(_, _)
+            | Expr::BvUle(_, _)
+            | Expr::BvUlt(_, _)
+            | Expr::BvSle(_, _)
+            | Expr::BvSlt(_, _)
+            | Expr::ForAll(_, _)
+            | Expr::Exists(_, _) => Type::Bool,
+
+            Expr::Int(_)
+            | Expr::Add(_)
+            | Expr::Sub(_)
+            | Expr::Mul(_)
+            | Expr::Div(_, _)
+            | Expr::StrLen(_) => Type::Int,
+
             Expr::Real(_, _) => Type::Real,
-            
+
             Expr::Var(_, ty) => ty.clone(),
-            
+
             Expr::BvConst(_, w) => Type::BitVec(*w),
-            Expr::BvAdd(a, _) | Expr::BvSub(a, _) | Expr::BvMul(a, _) |
-            Expr::BvAnd(a, _) | Expr::BvOr(a, _) | Expr::BvXor(a, _) |
-            Expr::BvNot(a) | Expr::BvShl(a, _) | Expr::BvLshr(a, _) |
-            Expr::BvAshr(a, _) => a.get_type(),
+            Expr::BvAdd(a, _)
+            | Expr::BvSub(a, _)
+            | Expr::BvMul(a, _)
+            | Expr::BvAnd(a, _)
+            | Expr::BvOr(a, _)
+            | Expr::BvXor(a, _)
+            | Expr::BvNot(a)
+            | Expr::BvShl(a, _)
+            | Expr::BvLshr(a, _)
+            | Expr::BvAshr(a, _) => a.get_type(),
             Expr::BvExtract(h, l, _) => Type::BitVec(h - l + 1),
             Expr::BvConcat(a, b) => {
                 if let (Type::BitVec(wa), Type::BitVec(wb)) = (a.get_type(), b.get_type()) {
@@ -28,7 +51,7 @@ impl Expr {
                     Type::Unknown
                 }
             }
-            
+
             Expr::Select(a, _) => {
                 if let Type::Array(_, ety) = a.get_type() {
                     *ety
@@ -37,9 +60,9 @@ impl Expr {
                 }
             }
             Expr::Store(a, _, _) => a.get_type(),
-            
+
             Expr::StrConst(_) | Expr::StrConcat(_) => Type::String,
-            
+
             Expr::App(name, args) if name == "fp" => match args.as_slice() {
                 [Expr::BvConst(_, 1), Expr::BvConst(_, ebits), Expr::BvConst(_, sig_bits)] => {
                     Type::Float(fp::FloatSort {
@@ -50,14 +73,13 @@ impl Expr {
                 _ => Type::Unknown,
             },
             Expr::App(name, args) if name.starts_with("fp.") => match name.as_str() {
-                "fp.add" | "fp.sub" | "fp.mul" | "fp.div" | "fp.sqrt" | "fp.neg" | "fp.abs" => {
-                    args.iter()
-                        .find_map(|arg| match arg.get_type() {
-                            Type::Float(sort) => Some(Type::Float(sort)),
-                            _ => None,
-                        })
-                        .unwrap_or(Type::Unknown)
-                }
+                "fp.add" | "fp.sub" | "fp.mul" | "fp.div" | "fp.sqrt" | "fp.neg" | "fp.abs" => args
+                    .iter()
+                    .find_map(|arg| match arg.get_type() {
+                        Type::Float(sort) => Some(Type::Float(sort)),
+                        _ => None,
+                    })
+                    .unwrap_or(Type::Unknown),
                 "fp.isNaN" | "fp.isInfinite" | "fp.isZero" => Type::Bool,
                 _ => Type::Unknown,
             },
@@ -78,12 +100,23 @@ impl Expr {
             Expr::And(args) => Expr::And(args.iter().map(|a| a.substitute(vars)).collect()),
             Expr::Or(args) => Expr::Or(args.iter().map(|a| a.substitute(vars)).collect()),
             Expr::Not(inner) => Expr::Not(Box::new(inner.substitute(vars))),
-            Expr::Implies(a, b) => Expr::Implies(Box::new(a.substitute(vars)), Box::new(b.substitute(vars))),
+            Expr::Implies(a, b) => {
+                Expr::Implies(Box::new(a.substitute(vars)), Box::new(b.substitute(vars)))
+            }
             Expr::Eq(a, b) => Expr::Eq(Box::new(a.substitute(vars)), Box::new(b.substitute(vars))),
             Expr::Add(args) => Expr::Add(args.iter().map(|a| a.substitute(vars)).collect()),
-            Expr::App(name, args) => Expr::App(name.clone(), args.iter().map(|a| a.substitute(vars)).collect()),
-            Expr::Select(a, i) => Expr::Select(Box::new(a.substitute(vars)), Box::new(i.substitute(vars))),
-            Expr::Store(a, i, v) => Expr::Store(Box::new(a.substitute(vars)), Box::new(i.substitute(vars)), Box::new(v.substitute(vars))),
+            Expr::App(name, args) => Expr::App(
+                name.clone(),
+                args.iter().map(|a| a.substitute(vars)).collect(),
+            ),
+            Expr::Select(a, i) => {
+                Expr::Select(Box::new(a.substitute(vars)), Box::new(i.substitute(vars)))
+            }
+            Expr::Store(a, i, v) => Expr::Store(
+                Box::new(a.substitute(vars)),
+                Box::new(i.substitute(vars)),
+                Box::new(v.substitute(vars)),
+            ),
             _ => self.clone(),
         }
     }
@@ -91,14 +124,36 @@ impl Expr {
     pub fn contains_var(&self, name: &str) -> bool {
         match self {
             Expr::Var(n, _) => n == name,
-            Expr::And(args) | Expr::Or(args) | Expr::Add(args) | Expr::Mul(args) => args.iter().any(|a| a.contains_var(name)),
+            Expr::And(args) | Expr::Or(args) | Expr::Add(args) | Expr::Mul(args) => {
+                args.iter().any(|a| a.contains_var(name))
+            }
             Expr::Not(inner) | Expr::BvNot(inner) | Expr::StrLen(inner) => inner.contains_var(name),
-            Expr::Implies(a, b) | Expr::Eq(a, b) | Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b) | 
-            Expr::Div(a, b) | Expr::BvAdd(a, b) | Expr::BvSub(a, b) | Expr::BvMul(a, b) | 
-            Expr::BvAnd(a, b) | Expr::BvOr(a, b) | Expr::BvXor(a, b) | Expr::BvShl(a, b) | Expr::BvLshr(a, b) | Expr::BvAshr(a, b) | 
-            Expr::BvUle(a, b) | Expr::BvUlt(a, b) | Expr::BvSle(a, b) | Expr::BvSlt(a, b) | Expr::BvConcat(a, b) | 
-            Expr::Select(a, b) | Expr::StrContains(a, b) => a.contains_var(name) || b.contains_var(name),
-            Expr::Ite(c, t, e) | Expr::Store(c, t, e) => c.contains_var(name) || t.contains_var(name) || e.contains_var(name),
+            Expr::Implies(a, b)
+            | Expr::Eq(a, b)
+            | Expr::Lt(a, b)
+            | Expr::Le(a, b)
+            | Expr::Gt(a, b)
+            | Expr::Ge(a, b)
+            | Expr::Div(a, b)
+            | Expr::BvAdd(a, b)
+            | Expr::BvSub(a, b)
+            | Expr::BvMul(a, b)
+            | Expr::BvAnd(a, b)
+            | Expr::BvOr(a, b)
+            | Expr::BvXor(a, b)
+            | Expr::BvShl(a, b)
+            | Expr::BvLshr(a, b)
+            | Expr::BvAshr(a, b)
+            | Expr::BvUle(a, b)
+            | Expr::BvUlt(a, b)
+            | Expr::BvSle(a, b)
+            | Expr::BvSlt(a, b)
+            | Expr::BvConcat(a, b)
+            | Expr::Select(a, b)
+            | Expr::StrContains(a, b) => a.contains_var(name) || b.contains_var(name),
+            Expr::Ite(c, t, e) | Expr::Store(c, t, e) => {
+                c.contains_var(name) || t.contains_var(name) || e.contains_var(name)
+            }
             Expr::App(_, args) => args.iter().any(|a| a.contains_var(name)),
             _ => false,
         }
@@ -109,7 +164,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use num_bigint::BigInt;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum Expr {
@@ -151,7 +206,7 @@ pub enum Expr {
     BvExtract(usize, usize, Box<Expr>), // high, low, expr
     BvConcat(Box<Expr>, Box<Expr>),
     // Arrays
-    Select(Box<Expr>, Box<Expr>),        // Array, Index
+    Select(Box<Expr>, Box<Expr>),           // Array, Index
     Store(Box<Expr>, Box<Expr>, Box<Expr>), // Array, Index, Value
     // Quantifiers
     ForAll(Vec<(String, Type)>, Box<Expr>), // Bound variables and body
@@ -173,7 +228,7 @@ pub enum Type {
     BitVec(usize),
     String,
     Array(Box<Type>, Box<Type>), // Index Type, Element Type
-    Fn(Vec<Type>, Box<Type>), // Function type
+    Fn(Vec<Type>, Box<Type>),    // Function type
 }
 
 #[derive(Debug, Clone)]

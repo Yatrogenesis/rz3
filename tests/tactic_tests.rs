@@ -1,5 +1,5 @@
-use rz3::tactic::Simplifier;
 use rz3::ast::Expr;
+use rz3::tactic::Simplifier;
 
 #[test]
 fn test_simplify_boolean() {
@@ -27,7 +27,9 @@ fn test_simplify_arithmetic() {
     let simplified = Simplifier::simplify(expr);
     // Nota: El simplificador actual pone las constantes al final
     assert!(matches!(simplified, Expr::Add(_)));
-    let Expr::Add(args) = simplified else { return; };
+    let Expr::Add(args) = simplified else {
+        return;
+    };
     assert!(args.contains(&x));
     assert!(args.contains(&Expr::Int(5)));
 }

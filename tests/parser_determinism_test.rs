@@ -1,4 +1,3 @@
-
 use rz3::parser::Parser;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -7,7 +6,7 @@ use std::hash::{Hash, Hasher};
 fn test_parser_determinism() {
     let input = "(define-fun h ((x Real)) Real (ite (<= x 0.0) 0.0 x))";
     let mut outputs = Vec::new();
-    
+
     for _ in 0..30 {
         let mut parser = Parser::new(input);
         let cmd = parser.parse_command().unwrap();
@@ -17,7 +16,7 @@ fn test_parser_determinism() {
         output_str.hash(&mut hasher);
         outputs.push(hasher.finish());
     }
-    
+
     // Check all are identical
     let first = outputs[0];
     for &o in &outputs[1..] {

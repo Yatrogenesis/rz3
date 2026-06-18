@@ -7,7 +7,7 @@ use crate::ast::Expr;
 pub enum ProofStep {
     Assume(Expr),
     TheoryLemma(Vec<Expr>, String), // The conflict clause and the theory name
-    Resolution(usize, usize),      // Reference to two previous steps
+    Resolution(usize, usize),       // Reference to two previous steps
 }
 
 pub struct Proof {

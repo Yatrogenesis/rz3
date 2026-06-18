@@ -1,9 +1,9 @@
-use crate::ast::{Expr, Type, ModelValue};
-use num_rational::BigRational;
-use num_bigint::BigInt;
-use num_traits::ToPrimitive;
-use crate::theory::TheorySolver;
+use crate::ast::{Expr, ModelValue, Type};
 use crate::theory::euf::{EufSolver, Node};
+use crate::theory::TheorySolver;
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub struct QuantifierSolver {
@@ -13,7 +13,11 @@ pub struct QuantifierSolver {
     pattern_index: BTreeMap<String, Vec<usize>>,
 }
 
-impl Default for QuantifierSolver { fn default() -> Self { Self::new() } }
+impl Default for QuantifierSolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl QuantifierSolver {
     pub fn new() -> Self {
@@ -37,11 +41,16 @@ impl QuantifierSolver {
                 if let Some(id) = euf.get_id_public(expr) {
                     self.pattern_index.entry(name.clone()).or_default().push(id);
                 }
-                for arg in args { self.collect_ground_terms(arg, euf); }
+                for arg in args {
+                    self.collect_ground_terms(arg, euf);
+                }
             }
             Expr::Select(a, i) => {
                 if let Some(id) = euf.get_id_public(expr) {
-                    self.pattern_index.entry("select".to_string()).or_default().push(id);
+                    self.pattern_index
+                        .entry("select".to_string())
+                        .or_default()
+                        .push(id);
                 }
                 self.collect_ground_terms(a, euf);
                 self.collect_ground_terms(i, euf);
@@ -50,7 +59,11 @@ impl QuantifierSolver {
         }
     }
 
-    pub fn generate_lemmas(&mut self, euf: &mut EufSolver, model: &BTreeMap<String, ModelValue>) -> Vec<Expr> {
+    pub fn generate_lemmas(
+        &mut self,
+        euf: &mut EufSolver,
+        model: &BTreeMap<String, ModelValue>,
+    ) -> Vec<Expr> {
         let mut lemmas = Vec::new();
         self.pattern_index.clear();
         let n_ids = euf.get_num_ids();
@@ -59,7 +72,7 @@ impl QuantifierSolver {
             self.collect_ground_terms(&expr, euf);
             self.ground_terms.insert(expr);
         }
-        
+
         for q_expr in &self.quantifiers {
             if let Expr::ForAll(vars, body) = q_expr {
                 // Instanciar con ground terms conocidos (MBQI robusto)
@@ -69,12 +82,15 @@ impl QuantifierSolver {
                             let mut sub = BTreeMap::new();
                             sub.insert(name.clone(), term.clone());
                             let instantiated = body.substitute(&sub);
-                            let lemma = Expr::Implies(Box::new(q_expr.clone()), Box::new(instantiated));
-                            if self.instantiations.insert(lemma.clone()) { lemmas.push(lemma); }
+                            let lemma =
+                                Expr::Implies(Box::new(q_expr.clone()), Box::new(instantiated));
+                            if self.instantiations.insert(lemma.clone()) {
+                                lemmas.push(lemma);
+                            }
                         }
                     }
                 }
-                
+
                 // MBQI: Instanciación basada en modelo si es falso
                 if !self.evaluate_quantifier(q_expr, model) {
                     let mut sub = BTreeMap::new();
@@ -87,18 +103,28 @@ impl QuantifierSolver {
                     }
                     let instantiated = body.substitute(&sub);
                     let lemma = Expr::Implies(Box::new(q_expr.clone()), Box::new(instantiated));
-                    if self.instantiations.insert(lemma.clone()) { lemmas.push(lemma); }
+                    if self.instantiations.insert(lemma.clone()) {
+                        lemmas.push(lemma);
+                    }
                 }
 
                 // E-matching
                 let patterns = self.infer_patterns(body, vars);
                 for pattern in patterns {
                     let mut substitutions = Vec::new();
-                    self.match_pattern(&pattern, vars, euf, &mut BTreeMap::new(), &mut substitutions);
+                    self.match_pattern(
+                        &pattern,
+                        vars,
+                        euf,
+                        &mut BTreeMap::new(),
+                        &mut substitutions,
+                    );
                     for sub in substitutions {
                         let instantiated = body.substitute(&sub);
                         let lemma = Expr::Implies(Box::new(q_expr.clone()), Box::new(instantiated));
-                        if self.instantiations.insert(lemma.clone()) { lemmas.push(lemma); }
+                        if self.instantiations.insert(lemma.clone()) {
+                            lemmas.push(lemma);
+                        }
                     }
                 }
             }
@@ -127,33 +153,51 @@ impl QuantifierSolver {
         }
     }
 
-    fn evaluate_expr(&self, expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<ModelValue> {
+    fn evaluate_expr(
+        &self,
+        expr: &Expr,
+        model: &BTreeMap<String, ModelValue>,
+    ) -> Option<ModelValue> {
         match expr {
             Expr::Var(name, _) => model.get(name).cloned(),
             Expr::Bool(b) => Some(ModelValue::Bool(*b)),
             Expr::Int(i) => Some(ModelValue::Int(BigInt::from(*i))),
-            Expr::Real(i, s) => Some(ModelValue::Real(BigRational::new(BigInt::from(*i), BigInt::from(10u8).pow(*s)))),
+            Expr::Real(i, s) => Some(ModelValue::Real(BigRational::new(
+                BigInt::from(*i),
+                BigInt::from(10u8).pow(*s),
+            ))),
             Expr::And(args) => {
                 let mut res = true;
                 for arg in args {
                     if let Some(ModelValue::Bool(b)) = self.evaluate_expr(arg, model) {
-                        if !b { res = false; break; }
-                    } else { return None; }
+                        if !b {
+                            res = false;
+                            break;
+                        }
+                    } else {
+                        return None;
+                    }
                 }
                 Some(ModelValue::Bool(res))
             }
             Expr::Not(inner) => {
                 if let Some(ModelValue::Bool(b)) = self.evaluate_expr(inner, model) {
                     Some(ModelValue::Bool(!b))
-                } else { None }
+                } else {
+                    None
+                }
             }
             Expr::Eq(a, b) => {
                 let ea = self.evaluate_expr(a, model);
                 let eb = self.evaluate_expr(b, model);
                 match (ea, eb) {
-                    (Some(ModelValue::Int(va)), Some(ModelValue::Int(vb))) => Some(ModelValue::Bool(va == vb)),
-                    (Some(ModelValue::Real(va)), Some(ModelValue::Real(vb))) => Some(ModelValue::Bool(va == vb)),
-                    _ => None
+                    (Some(ModelValue::Int(va)), Some(ModelValue::Int(vb))) => {
+                        Some(ModelValue::Bool(va == vb))
+                    }
+                    (Some(ModelValue::Real(va)), Some(ModelValue::Real(vb))) => {
+                        Some(ModelValue::Bool(va == vb))
+                    }
+                    _ => None,
                 }
             }
             Expr::App(name, _args) => model.get(name).cloned(),
@@ -165,7 +209,9 @@ impl QuantifierSolver {
         match (val, ty) {
             (ModelValue::Bool(b), _) => Some(Expr::Bool(*b)),
             (ModelValue::Int(i), _) => i.to_i64().map(Expr::Int),
-            (ModelValue::Real(r), _) if r.is_integer() => r.to_integer().to_i64().map(|i| Expr::Real(i, 0)),
+            (ModelValue::Real(r), _) if r.is_integer() => {
+                r.to_integer().to_i64().map(|i| Expr::Real(i, 0))
+            }
             _ => None,
         }
     }
@@ -173,15 +219,20 @@ impl QuantifierSolver {
     fn infer_patterns(&self, body: &Expr, vars: &[(String, Type)]) -> Vec<Expr> {
         let mut patterns = Vec::new();
         self.collect_apps(body, vars, &mut patterns);
-        if patterns.is_empty() { patterns.push(body.clone()); }
+        if patterns.is_empty() {
+            patterns.push(body.clone());
+        }
         patterns
     }
 
     fn collect_apps(&self, expr: &Expr, vars: &[(String, Type)], patterns: &mut Vec<Expr>) {
         match expr {
-            Expr::App(_, _) | Expr::Select(_, _) 
-                if vars.iter().any(|(vname, _)| self.uses_variable(expr, vname)) => {
-                    patterns.push(expr.clone());
+            Expr::App(_, _) | Expr::Select(_, _)
+                if vars
+                    .iter()
+                    .any(|(vname, _)| self.uses_variable(expr, vname)) =>
+            {
+                patterns.push(expr.clone());
             }
             _ => {}
         }
@@ -210,7 +261,8 @@ impl QuantifierSolver {
                 for &term_id in candidates {
                     let mut sub = current_sub.clone();
                     if self.match_recursive(pattern, term_id, &mut sub, &mut ctx)
-                        && sub.len() == vars.len() {
+                        && sub.len() == vars.len()
+                    {
                         ctx.results.push(sub);
                     }
                 }
@@ -261,12 +313,15 @@ impl QuantifierSolver {
         current_sub: &mut BTreeMap<String, Expr>,
         ctx: &mut MatchContext,
     ) -> bool {
-        if p_args.is_empty() { return true; }
+        if p_args.is_empty() {
+            return true;
+        }
         let mut sub = current_sub.clone();
         if self.match_recursive(&p_args[0], t_args[0], &mut sub, ctx)
-            && self.match_args(&p_args[1..], &t_args[1..], &mut sub, ctx) {
-                *current_sub = sub;
-                return true;
+            && self.match_args(&p_args[1..], &t_args[1..], &mut sub, ctx)
+        {
+            *current_sub = sub;
+            return true;
         }
         false
     }
@@ -280,9 +335,17 @@ struct MatchContext<'a> {
 
 impl TheorySolver for QuantifierSolver {
     fn assert(&mut self, expr: &Expr) {
-        if let Expr::ForAll(_, _) = expr { self.quantifiers.push(expr.clone()); }
+        if let Expr::ForAll(_, _) = expr {
+            self.quantifiers.push(expr.clone());
+        }
     }
-    fn check(&mut self) -> bool { true }
-    fn explain(&self) -> Vec<Expr> { Vec::new() }
-    fn get_model_value(&self, _expr: &Expr) -> Option<ModelValue> { None }
+    fn check(&mut self) -> bool {
+        true
+    }
+    fn explain(&self) -> Vec<Expr> {
+        Vec::new()
+    }
+    fn get_model_value(&self, _expr: &Expr) -> Option<ModelValue> {
+        None
+    }
 }

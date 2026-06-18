@@ -9,14 +9,22 @@
 // catches the same-form contradiction up front. These tests pin the verdict at the
 // solver level so future regressions are isolated to rz3, not the bridge.
 
-use rz3::Rz3Solver;
 use rz3::ast::{Expr, Type};
+use rz3::Rz3Solver;
 use rz3::SolverResult;
 
-fn int(n: i64) -> Expr { Expr::Int(n) }
-fn ivar(name: &str) -> Expr { Expr::Var(name.to_string(), Type::Int) }
-fn rvar(name: &str) -> Expr { Expr::Var(name.to_string(), Type::Real) }
-fn real(numer: i64, scale: u32) -> Expr { Expr::Real(numer, scale) }
+fn int(n: i64) -> Expr {
+    Expr::Int(n)
+}
+fn ivar(name: &str) -> Expr {
+    Expr::Var(name.to_string(), Type::Int)
+}
+fn rvar(name: &str) -> Expr {
+    Expr::Var(name.to_string(), Type::Real)
+}
+fn real(numer: i64, scale: u32) -> Expr {
+    Expr::Real(numer, scale)
+}
 
 #[test]
 fn strict_lower_and_upper_at_same_point_is_unsat() {
@@ -24,7 +32,10 @@ fn strict_lower_and_upper_at_same_point_is_unsat() {
     let mut s = Rz3Solver::new();
     s.assert(&Expr::Gt(Box::new(ivar("x")), Box::new(int(0))));
     s.assert(&Expr::Lt(Box::new(ivar("x")), Box::new(int(0))));
-    assert!(matches!(s.check(), SolverResult::Unsat), "x>0 ∧ x<0 must be Unsat");
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "x>0 ∧ x<0 must be Unsat"
+    );
 }
 
 #[test]
@@ -34,7 +45,10 @@ fn real_crossing_strict_bounds_is_unsat() {
     s.assert(&Expr::Gt(Box::new(rvar("dose")), Box::new(real(25, 1))));
     s.assert(&Expr::Lt(Box::new(rvar("dose")), Box::new(real(30, 1))));
     s.assert(&Expr::Gt(Box::new(rvar("dose")), Box::new(real(40, 1))));
-    assert!(matches!(s.check(), SolverResult::Unsat), "crossing real bounds must be Unsat");
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "crossing real bounds must be Unsat"
+    );
 }
 
 #[test]
@@ -43,7 +57,10 @@ fn eq_then_strict_above_is_unsat() {
     let mut s = Rz3Solver::new();
     s.assert(&Expr::Eq(Box::new(ivar("x")), Box::new(int(5))));
     s.assert(&Expr::Gt(Box::new(ivar("x")), Box::new(int(5))));
-    assert!(matches!(s.check(), SolverResult::Unsat), "x==5 ∧ x>5 must be Unsat");
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "x==5 ∧ x>5 must be Unsat"
+    );
 }
 
 // --- Soundness guard: the fix must NOT turn satisfiable systems into Unsat ---
@@ -54,7 +71,10 @@ fn open_interval_with_room_is_sat() {
     let mut s = Rz3Solver::new();
     s.assert(&Expr::Gt(Box::new(ivar("x")), Box::new(int(0))));
     s.assert(&Expr::Lt(Box::new(ivar("x")), Box::new(int(100))));
-    assert!(matches!(s.check(), SolverResult::Sat), "x>0 ∧ x<100 must be Sat");
+    assert!(
+        matches!(s.check(), SolverResult::Sat),
+        "x>0 ∧ x<100 must be Sat"
+    );
 }
 
 #[test]
@@ -71,7 +91,10 @@ fn real_open_interval_is_sat() {
     let mut s = Rz3Solver::new();
     s.assert(&Expr::Gt(Box::new(rvar("dose")), Box::new(real(25, 1))));
     s.assert(&Expr::Lt(Box::new(rvar("dose")), Box::new(real(30, 1))));
-    assert!(matches!(s.check(), SolverResult::Sat), "dose∈(2.5,3.0) must be Sat");
+    assert!(
+        matches!(s.check(), SolverResult::Sat),
+        "dose∈(2.5,3.0) must be Sat"
+    );
 }
 
 // --- Canonical-form generalization: proportional and sign-variant forms ---
@@ -80,9 +103,15 @@ fn real_open_interval_is_sat() {
 fn proportional_forms_conflict_is_unsat() {
     // 2x>0 ∧ x<0 → UNSAT (rows {x:2} and {x:1} share canonical form {x:1})
     let mut s = Rz3Solver::new();
-    s.assert(&Expr::Gt(Box::new(Expr::Mul(vec![int(2), ivar("x")])), Box::new(int(0))));
+    s.assert(&Expr::Gt(
+        Box::new(Expr::Mul(vec![int(2), ivar("x")])),
+        Box::new(int(0)),
+    ));
     s.assert(&Expr::Lt(Box::new(ivar("x")), Box::new(int(0))));
-    assert!(matches!(s.check(), SolverResult::Unsat), "2x>0 ∧ x<0 must be Unsat");
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "2x>0 ∧ x<0 must be Unsat"
+    );
 }
 
 #[test]
@@ -91,7 +120,10 @@ fn sign_variant_forms_conflict_is_unsat() {
     let mut s = Rz3Solver::new();
     s.assert(&Expr::Gt(Box::new(ivar("x")), Box::new(ivar("y"))));
     s.assert(&Expr::Gt(Box::new(ivar("y")), Box::new(ivar("x"))));
-    assert!(matches!(s.check(), SolverResult::Unsat), "x>y ∧ y>x must be Unsat");
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "x>y ∧ y>x must be Unsat"
+    );
 }
 
 // --- Soundness guards for canonical/sign-flip: must NOT become false UNSAT ---
@@ -100,9 +132,15 @@ fn sign_variant_forms_conflict_is_unsat() {
 fn proportional_compatible_is_sat() {
     // 2x>0 ∧ x>-5 → SAT (canonical merge {x:1}, two lowers, no conflict)
     let mut s = Rz3Solver::new();
-    s.assert(&Expr::Gt(Box::new(Expr::Mul(vec![int(2), ivar("x")])), Box::new(int(0))));
+    s.assert(&Expr::Gt(
+        Box::new(Expr::Mul(vec![int(2), ivar("x")])),
+        Box::new(int(0)),
+    ));
     s.assert(&Expr::Gt(Box::new(ivar("x")), Box::new(int(-5))));
-    assert!(matches!(s.check(), SolverResult::Sat), "2x>0 ∧ x>-5 must be Sat");
+    assert!(
+        matches!(s.check(), SolverResult::Sat),
+        "2x>0 ∧ x>-5 must be Sat"
+    );
 }
 
 #[test]
@@ -113,7 +151,10 @@ fn sign_variant_compatible_interval_is_sat() {
     // x < y + 10  →  x - y < 10
     let y_plus_10 = Expr::Add(vec![ivar("y"), int(10)]);
     s.assert(&Expr::Lt(Box::new(ivar("x")), Box::new(y_plus_10)));
-    assert!(matches!(s.check(), SolverResult::Sat), "x>y ∧ x<y+10 must be Sat");
+    assert!(
+        matches!(s.check(), SolverResult::Sat),
+        "x>y ∧ x<y+10 must be Sat"
+    );
 }
 
 #[test]

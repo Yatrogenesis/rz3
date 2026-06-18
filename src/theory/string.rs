@@ -1,6 +1,6 @@
 use crate::ast::{Expr, ModelValue};
 use crate::theory::TheorySolver;
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct StringSolver {
     /// Lemas de longitud ya instanciados
@@ -38,11 +38,16 @@ impl StringSolver {
                 self.collect_terms(s);
             }
             Expr::StrConst(s) => {
-                let axiom = Expr::Eq(Box::new(Expr::StrLen(Box::new(expr.clone()))), Box::new(Expr::Int(s.len() as i64)));
+                let axiom = Expr::Eq(
+                    Box::new(Expr::StrLen(Box::new(expr.clone()))),
+                    Box::new(Expr::Int(s.len() as i64)),
+                );
                 self.pending_lemmas.push(axiom);
             }
             Expr::StrConcat(args) => {
-                for arg in args { self.collect_terms(arg); }
+                for arg in args {
+                    self.collect_terms(arg);
+                }
             }
             Expr::StrContains(a, b) => {
                 self.collect_terms(a);
@@ -53,8 +58,14 @@ impl StringSolver {
                 self.collect_terms(b);
             }
             Expr::Not(inner) => self.collect_terms(inner),
-            Expr::And(args) | Expr::Or(args) | Expr::Add(args) | Expr::Sub(args) | Expr::Mul(args) => {
-                for arg in args { self.collect_terms(arg); }
+            Expr::And(args)
+            | Expr::Or(args)
+            | Expr::Add(args)
+            | Expr::Sub(args)
+            | Expr::Mul(args) => {
+                for arg in args {
+                    self.collect_terms(arg);
+                }
             }
             _ => {}
         }
@@ -82,7 +93,7 @@ impl TheorySolver for StringSolver {
         // Implementación básica: verificar que no haya contradicciones en longitudes
         // Ej: (str.len s) = 3 y (str.len s) = 5
         let mut lengths: BTreeMap<Expr, i64> = BTreeMap::new();
-        
+
         for lemma in &self.pending_lemmas {
             if let Expr::Eq(a, b) = lemma {
                 if let (Expr::StrLen(s), Expr::Int(len)) = (&**a, &**b) {

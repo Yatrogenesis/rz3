@@ -1,14 +1,15 @@
 [package]
 name = "rz3"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Francisco Molina-Burgos <pako.molina@gmail.com>"]
-description = "Deterministic, exact-rational SMT solver in pure Rust (DPLL(T)/CDCL) with a complete linear-arithmetic core. Zero C dependencies, WASM-deployable, reproducible run-to-run."
+description = "Deterministic, exact-rational SMT solver in pure Rust (DPLL(T)/CDCL) with an exact linear-arithmetic core. Zero C dependencies, WASM-deployable, reproducible run-to-run."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Yatrogenesis/rz3"
 readme = "README.md"
 keywords = ["smt", "solver", "theorem-prover", "satisfiability", "deterministic"]
 categories = ["mathematics", "science", "algorithms"]
+rust-version = "1.70"
 exclude = ["/.codex_target", "/.codex_tmp", "/.codex_cache"]
 
 [[bin]]

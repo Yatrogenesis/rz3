@@ -70,7 +70,10 @@ fn get_value_handles_large_decimal_scale_without_i64_overflow() {
     let value = match solver.get_value(&x) {
         Some(value) => value,
         None => {
-            assert!(solver.get_value(&x).is_some(), "expected exact model value for tiny");
+            assert!(
+                solver.get_value(&x).is_some(),
+                "expected exact model value for tiny"
+            );
             return;
         }
     };

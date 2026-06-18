@@ -1,8 +1,8 @@
 use crate::ast::{Expr, ModelValue, Type};
-use std::collections::BTreeMap;
 use crate::theory::TheorySolver;
-use num_rational::BigRational;
 use num_bigint::BigInt;
+use num_rational::BigRational;
+use std::collections::BTreeMap;
 
 type Rational = BigRational;
 
@@ -44,7 +44,11 @@ struct DeltaRational {
 
 impl DeltaRational {
     fn rational(c: Rational) -> Self {
-        Self { c, k: rat(0, 1), eps: BTreeMap::new() }
+        Self {
+            c,
+            k: rat(0, 1),
+            eps: BTreeMap::new(),
+        }
     }
 
     fn zero() -> Self {
@@ -54,8 +58,14 @@ impl DeltaRational {
     /// `c + kδ + coef·ε_idx` — a single lexicographic perturbation on level `idx`.
     fn with_perturbation(c: Rational, k: i64, idx: usize, coef: Rational) -> Self {
         let mut eps = BTreeMap::new();
-        if coef != rat(0, 1) { eps.insert(idx, coef); }
-        Self { c, k: int_rat(k), eps }
+        if coef != rat(0, 1) {
+            eps.insert(idx, coef);
+        }
+        Self {
+            c,
+            k: int_rat(k),
+            eps,
+        }
     }
 
     fn add(&self, rhs: &Self) -> Self {
@@ -63,9 +73,15 @@ impl DeltaRational {
         for (i, v) in &rhs.eps {
             let e = eps.entry(*i).or_insert_with(|| rat(0, 1));
             *e += v.clone();
-            if *e == rat(0, 1) { eps.remove(i); }
+            if *e == rat(0, 1) {
+                eps.remove(i);
+            }
         }
-        Self { c: self.c.clone() + rhs.c.clone(), k: self.k.clone() + rhs.k.clone(), eps }
+        Self {
+            c: self.c.clone() + rhs.c.clone(),
+            k: self.k.clone() + rhs.k.clone(),
+            eps,
+        }
     }
 
     fn sub(&self, rhs: &Self) -> Self {
@@ -73,15 +89,31 @@ impl DeltaRational {
         for (i, v) in &rhs.eps {
             let e = eps.entry(*i).or_insert_with(|| rat(0, 1));
             *e -= v.clone();
-            if *e == rat(0, 1) { eps.remove(i); }
+            if *e == rat(0, 1) {
+                eps.remove(i);
+            }
         }
-        Self { c: self.c.clone() - rhs.c.clone(), k: self.k.clone() - rhs.k.clone(), eps }
+        Self {
+            c: self.c.clone() - rhs.c.clone(),
+            k: self.k.clone() - rhs.k.clone(),
+            eps,
+        }
     }
 
     fn scale(&self, a: Rational) -> Self {
-        if a == rat(0, 1) { return Self::zero(); }
-        let eps = self.eps.iter().map(|(i, v)| (*i, v.clone() * a.clone())).collect();
-        Self { c: self.c.clone() * a.clone(), k: self.k.clone() * a, eps }
+        if a == rat(0, 1) {
+            return Self::zero();
+        }
+        let eps = self
+            .eps
+            .iter()
+            .map(|(i, v)| (*i, v.clone() * a.clone()))
+            .collect();
+        Self {
+            c: self.c.clone() * a.clone(),
+            k: self.k.clone() * a,
+            eps,
+        }
     }
 
     /// Total lexicographic order: `c`, then `kδ`, then `εᵢ` by ascending index (ε₁ dominates ε₂…).
@@ -92,7 +124,8 @@ impl DeltaRational {
                 Ordering::Equal => {
                     let zero = rat(0, 1);
                     // union of indices, ascending (BTreeMap keys are sorted)
-                    let mut idxs: Vec<usize> = self.eps.keys().chain(rhs.eps.keys()).cloned().collect();
+                    let mut idxs: Vec<usize> =
+                        self.eps.keys().chain(rhs.eps.keys()).cloned().collect();
                     idxs.sort_unstable();
                     idxs.dedup();
                     for i in idxs {
@@ -124,7 +157,11 @@ impl DeltaRational {
     }
 
     fn min_delta(self, rhs: Self) -> Self {
-        if self.lt_delta(&rhs) { self } else { rhs }
+        if self.lt_delta(&rhs) {
+            self
+        } else {
+            rhs
+        }
     }
 
     fn is_positive(&self) -> bool {
@@ -138,7 +175,11 @@ impl DeltaRational {
     /// Drop the ε-perturbation, keeping the real value `c + kδ`. Used where the lexicographic
     /// tie-breaker must not leak into a real-value decision (e.g. disequality `≠` checks).
     fn real_part(&self) -> Self {
-        Self { c: self.c.clone(), k: self.k.clone(), eps: BTreeMap::new() }
+        Self {
+            c: self.c.clone(),
+            k: self.k.clone(),
+            eps: BTreeMap::new(),
+        }
     }
 }
 
@@ -246,7 +287,8 @@ impl LraSolver {
     /// Returns user-declared variable assignments for model extraction.
     pub fn get_all_assignments(&self) -> Vec<(String, BigRational)> {
         let delta = self.model_delta();
-        self.var_map.iter()
+        self.var_map
+            .iter()
             .filter_map(|(name, &id)| {
                 self.assignment.get(&id).map(|value| {
                     let ratio = value.c.clone() + value.k.clone() * delta.clone();
@@ -279,11 +321,16 @@ impl LraSolver {
     fn update(&mut self, x_j: usize, v: DeltaRational) {
         let diff = v.sub(self.assignment.get(&x_j).unwrap_or(&DeltaRational::zero()));
         self.assignment.insert(x_j, v);
-        
+
         for (&x_i, row) in self.tableau.iter() {
             if let Some(a_ij) = row.get(&x_j) {
-                let current_val = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
-                self.assignment.insert(x_i, current_val.add(&diff.scale(a_ij.clone())));
+                let current_val = self
+                    .assignment
+                    .get(&x_i)
+                    .cloned()
+                    .unwrap_or_else(DeltaRational::zero);
+                self.assignment
+                    .insert(x_i, current_val.add(&diff.scale(a_ij.clone())));
             }
         }
     }
@@ -317,7 +364,7 @@ impl LraSolver {
         }
 
         self.tableau.insert(x_j, new_row);
-        
+
         if let Some(pos) = self.basic_vars.iter().position(|&v| v == x_i) {
             self.basic_vars[pos] = x_j;
         }
@@ -352,12 +399,18 @@ impl LraSolver {
         let mut groups: BTreeMap<Vec<(usize, Rational)>, Tight> = BTreeMap::new();
 
         for (&slack, row) in &self.tableau {
-            let Some((&_lead, lead_coeff)) = row.iter().next() else { continue }; // empty row → skip
-            if *lead_coeff == rat(0, 1) { continue; }
+            let Some((&_lead, lead_coeff)) = row.iter().next() else {
+                continue;
+            }; // empty row → skip
+            if *lead_coeff == rat(0, 1) {
+                continue;
+            }
             let factor = lead_coeff.clone();
             let flip = factor < rat(0, 1);
-            let key: Vec<(usize, Rational)> =
-                row.iter().map(|(&v, c)| (v, c.clone() / factor.clone())).collect();
+            let key: Vec<(usize, Rational)> = row
+                .iter()
+                .map(|(&v, c)| (v, c.clone() / factor.clone()))
+                .collect();
 
             // Map this slack's lower/upper into canonical orientation.
             // `orig_is_lower` records the original direction for origin lookup.
@@ -366,11 +419,23 @@ impl LraSolver {
             let canon_upper: Option<B>;
             if flip {
                 // dividing by a negative flips direction: original lower → canonical upper
-                canon_upper = self.lower_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, true) });
-                canon_lower = self.upper_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, false) });
+                canon_upper = self.lower_bounds.get(&slack).map(|b| {
+                    let (v, s) = scale(b);
+                    (v, s, slack, true)
+                });
+                canon_lower = self.upper_bounds.get(&slack).map(|b| {
+                    let (v, s) = scale(b);
+                    (v, s, slack, false)
+                });
             } else {
-                canon_lower = self.lower_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, true) });
-                canon_upper = self.upper_bounds.get(&slack).map(|b| { let (v, s) = scale(b); (v, s, slack, false) });
+                canon_lower = self.lower_bounds.get(&slack).map(|b| {
+                    let (v, s) = scale(b);
+                    (v, s, slack, true)
+                });
+                canon_upper = self.upper_bounds.get(&slack).map(|b| {
+                    let (v, s) = scale(b);
+                    (v, s, slack, false)
+                });
             }
 
             let entry = groups.entry(key).or_insert((None, None));
@@ -379,23 +444,31 @@ impl LraSolver {
                     None => true,
                     Some((cv, cs, _, _)) => cl.0 > *cv || (cl.0 == *cv && cl.1 && !*cs),
                 };
-                if tighter { entry.0 = Some(cl); }
+                if tighter {
+                    entry.0 = Some(cl);
+                }
             }
             if let Some(cu) = canon_upper {
                 let tighter = match &entry.1 {
                     None => true,
                     Some((cv, cs, _, _)) => cu.0 < *cv || (cu.0 == *cv && cu.1 && !*cs),
                 };
-                if tighter { entry.1 = Some(cu); }
+                if tighter {
+                    entry.1 = Some(cu);
+                }
             }
         }
 
-        for (_key, (lo, hi)) in &groups {
+        for (lo, hi) in groups.values() {
             if let (Some((lv, ls, lslack, lorig)), Some((uv, us, uslack, uorig))) = (lo, hi) {
                 if lv > uv || (lv == uv && (*ls || *us)) {
                     let mut origins = Vec::new();
-                    if let Some(e) = self.bound_origins.get(&(*lslack, *lorig)) { origins.push(e.clone()); }
-                    if let Some(e) = self.bound_origins.get(&(*uslack, *uorig)) { origins.push(e.clone()); }
+                    if let Some(e) = self.bound_origins.get(&(*lslack, *lorig)) {
+                        origins.push(e.clone());
+                    }
+                    if let Some(e) = self.bound_origins.get(&(*uslack, *uorig)) {
+                        origins.push(e.clone());
+                    }
                     self.bound_conflict = origins;
                     return true;
                 }
@@ -422,7 +495,7 @@ impl LraSolver {
     /// zero-extra-dependency / WASM-lean property.
     fn detect_difference_logic_conflict(&mut self) -> bool {
         const ZERO: usize = usize::MAX; // node representing the constant 0
-        // edges: (from, to, weight, origin)
+                                        // edges: (from, to, weight, origin)
         let mut edges: Vec<(usize, usize, DeltaRational, Expr)> = Vec::new();
         let mut nodes: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let zero = rat(0, 1);
@@ -437,10 +510,18 @@ impl LraSolver {
             // Reduce the row to `factor * (pos - neg)` with factor > 0, or skip if not DL.
             let (pos, neg, factor): (usize, usize, Rational) = match entries.as_slice() {
                 [(v, c)] => {
-                    if *c > zero { (*v, ZERO, c.clone()) } else { (ZERO, *v, -c.clone()) }
+                    if *c > zero {
+                        (*v, ZERO, c.clone())
+                    } else {
+                        (ZERO, *v, -c.clone())
+                    }
                 }
                 [(v1, c1), (v2, c2)] if *c1 == -c2.clone() => {
-                    if *c1 > zero { (*v1, *v2, c1.clone()) } else { (*v2, *v1, c2.clone()) }
+                    if *c1 > zero {
+                        (*v1, *v2, c1.clone())
+                    } else {
+                        (*v2, *v1, c2.clone())
+                    }
                 }
                 _ => continue, // not a difference-logic atom
             };
@@ -449,7 +530,15 @@ impl LraSolver {
             if let Some(lb) = self.lower_bounds.get(&slack) {
                 if let Some(o) = self.bound_origins.get(&(slack, true)) {
                     let k = -(lb.val.clone() / factor.clone());
-                    let w = DeltaRational { c: k, k: if lb.is_strict { -rat(1, 1) } else { zero.clone() }, eps: BTreeMap::new() };
+                    let w = DeltaRational {
+                        c: k,
+                        k: if lb.is_strict {
+                            -rat(1, 1)
+                        } else {
+                            zero.clone()
+                        },
+                        eps: BTreeMap::new(),
+                    };
                     edges.push((pos, neg, w, o.clone()));
                     nodes.insert(pos);
                     nodes.insert(neg);
@@ -459,7 +548,15 @@ impl LraSolver {
             if let Some(ub) = self.upper_bounds.get(&slack) {
                 if let Some(o) = self.bound_origins.get(&(slack, false)) {
                     let k = ub.val.clone() / factor.clone();
-                    let w = DeltaRational { c: k, k: if ub.is_strict { -rat(1, 1) } else { zero.clone() }, eps: BTreeMap::new() };
+                    let w = DeltaRational {
+                        c: k,
+                        k: if ub.is_strict {
+                            -rat(1, 1)
+                        } else {
+                            zero.clone()
+                        },
+                        eps: BTreeMap::new(),
+                    };
                     edges.push((neg, pos, w, o.clone()));
                     nodes.insert(neg);
                     nodes.insert(pos);
@@ -498,7 +595,9 @@ impl LraSolver {
 
         // Negative cycle present. Walk back n steps to land inside it, then collect the
         // cycle's edge origins (best-effort; the verdict is sound regardless).
-        let Some(mut cur) = last_relaxed else { return false };
+        let Some(mut cur) = last_relaxed else {
+            return false;
+        };
         for _ in 0..n {
             cur = pred[&cur].0;
         }
@@ -523,13 +622,25 @@ impl LraSolver {
     /// `ε ≪ δ` removes the degeneracy that makes the feasibility Simplex cycle, while preserving
     /// the SAT/UNSAT verdict in the limit `ε→0⁺` (δ dominates ε, so strict-bound conflicts stand).
     fn perturbed_lower(&self, v: usize) -> Option<DeltaRational> {
-        self.lower_bounds.get(&v).map(|b|
-            DeltaRational::with_perturbation(b.val.clone(), if b.is_strict { 1 } else { 0 }, v, rat(-1, 1)))
+        self.lower_bounds.get(&v).map(|b| {
+            DeltaRational::with_perturbation(
+                b.val.clone(),
+                if b.is_strict { 1 } else { 0 },
+                v,
+                rat(-1, 1),
+            )
+        })
     }
     /// Upper bound of `v`: `u (−δ if strict) + ε_v` (relaxed upward by the same perturbation).
     fn perturbed_upper(&self, v: usize) -> Option<DeltaRational> {
-        self.upper_bounds.get(&v).map(|b|
-            DeltaRational::with_perturbation(b.val.clone(), if b.is_strict { -1 } else { 0 }, v, rat(1, 1)))
+        self.upper_bounds.get(&v).map(|b| {
+            DeltaRational::with_perturbation(
+                b.val.clone(),
+                if b.is_strict { -1 } else { 0 },
+                v,
+                rat(1, 1),
+            )
+        })
     }
 
     pub fn check_feasibility(&mut self) -> bool {
@@ -562,7 +673,11 @@ impl LraSolver {
             basic_vars_sorted.sort_unstable();
 
             for &x_i in &basic_vars_sorted {
-                let val = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
+                let val = self
+                    .assignment
+                    .get(&x_i)
+                    .cloned()
+                    .unwrap_or_else(DeltaRational::zero);
                 // Compare against the lexicographically-perturbed bound (l+δ−ε_i / u−δ+ε_i),
                 // so strict bounds AND the ε-perturbation are honoured in one total order.
                 if let Some(pl) = self.perturbed_lower(x_i) {
@@ -581,7 +696,7 @@ impl LraSolver {
 
             if let Some((x_i, is_lower)) = violated_var {
                 let mut found_pivot = false;
-                
+
                 // Bland's rule: sort variables to ensure deterministic, low-index selection
                 let mut non_basic_vars = self.non_basic_vars.clone();
                 non_basic_vars.sort_unstable();
@@ -597,16 +712,26 @@ impl LraSolver {
                 for &x_j in &non_basic_vars {
                     let row = &self.tableau[&x_i];
                     let a_ij = row.get(&x_j).cloned().unwrap_or_else(|| rat(0, 1));
-                    if a_ij == rat(0, 1) { continue; }
+                    if a_ij == rat(0, 1) {
+                        continue;
+                    }
 
-                    let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
+                    let val_j = self
+                        .assignment
+                        .get(&x_j)
+                        .cloned()
+                        .unwrap_or_else(DeltaRational::zero);
 
                     let can_increase = if let Some(pu) = self.perturbed_upper(x_j) {
                         val_j.cmp_lex(&pu) == core::cmp::Ordering::Less
-                    } else { true };
+                    } else {
+                        true
+                    };
                     let can_decrease = if let Some(pl) = self.perturbed_lower(x_j) {
                         val_j.cmp_lex(&pl) == core::cmp::Ordering::Greater
-                    } else { true };
+                    } else {
+                        true
+                    };
 
                     let a_ij_gt_0 = a_ij > rat(0, 1);
                     let improves = if is_lower {
@@ -637,14 +762,21 @@ impl LraSolver {
                 for (idx, (coeffs, target, _)) in self.disequalities.iter().enumerate() {
                     let mut current_sum = DeltaRational::zero();
                     for (&var, coeff) in coeffs {
-                        let val = self.assignment.get(&var).cloned().unwrap_or_else(DeltaRational::zero);
+                        let val = self
+                            .assignment
+                            .get(&var)
+                            .cloned()
+                            .unwrap_or_else(DeltaRational::zero);
                         current_sum = current_sum.add(&val.scale(coeff.clone()));
                     }
                     // The ε-perturbation is only a tie-breaker for the bounds Simplex; a
                     // disequality `Σ≠target` is about the REAL value, so compare on the
                     // `c+kδ` part with ε projected out (otherwise a pinned `x=1` looks like
                     // `1±ε ≠ 1` and the genuine `x≠1` conflict is missed → false SAT).
-                    if current_sum.real_part() == DeltaRational::rational(target.clone()) { violated_idx = Some(idx); break; }
+                    if current_sum.real_part() == DeltaRational::rational(target.clone()) {
+                        violated_idx = Some(idx);
+                        break;
+                    }
                 }
                 match violated_idx {
                     None => return true,
@@ -679,32 +811,69 @@ impl LraSolver {
     /// de Simplex). `None` = sin cota (∞). Asume la asignación actual factible (room>=0).
     fn feasible_room(&self, x_j: usize) -> (Option<DeltaRational>, Option<DeltaRational>) {
         let zero = rat(0, 1);
-        let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
-        let mut up: Option<DeltaRational> = self.upper_bounds.get(&x_j)
-            .map(|b| DeltaRational { c: b.val.clone() - val_j.c.clone(), k: -val_j.k.clone(), eps: BTreeMap::new() });
-        let mut down: Option<DeltaRational> = self.lower_bounds.get(&x_j)
-            .map(|b| DeltaRational { c: val_j.c.clone() - b.val.clone(), k: val_j.k.clone(), eps: BTreeMap::new() });
+        let val_j = self
+            .assignment
+            .get(&x_j)
+            .cloned()
+            .unwrap_or_else(DeltaRational::zero);
+        let mut up: Option<DeltaRational> = self.upper_bounds.get(&x_j).map(|b| DeltaRational {
+            c: b.val.clone() - val_j.c.clone(),
+            k: -val_j.k.clone(),
+            eps: BTreeMap::new(),
+        });
+        let mut down: Option<DeltaRational> = self.lower_bounds.get(&x_j).map(|b| DeltaRational {
+            c: val_j.c.clone() - b.val.clone(),
+            k: val_j.k.clone(),
+            eps: BTreeMap::new(),
+        });
         for (&x_i, row) in self.tableau.iter() {
-            let a_ij = match row.get(&x_j) { Some(a) if *a != zero => a.clone(), _ => continue };
-            let val_i = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
+            let a_ij = match row.get(&x_j) {
+                Some(a) if *a != zero => a.clone(),
+                _ => continue,
+            };
+            let val_i = self
+                .assignment
+                .get(&x_i)
+                .cloned()
+                .unwrap_or_else(DeltaRational::zero);
             // Subir x_j por Δ mueve x_i por a_ij*Δ.
             if a_ij > zero {
                 if let Some(ub) = self.upper_bounds.get(&x_i) {
-                    let room = DeltaRational { c: ub.val.clone() - val_i.c.clone(), k: -val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / a_ij.clone());
+                    let room = DeltaRational {
+                        c: ub.val.clone() - val_i.c.clone(),
+                        k: -val_i.k.clone(),
+                        eps: BTreeMap::new(),
+                    }
+                    .scale(rat(1, 1) / a_ij.clone());
                     up = Some(up.map_or(room.clone(), |u| u.min_delta(room)));
                 }
                 if let Some(lb) = self.lower_bounds.get(&x_i) {
-                    let room = DeltaRational { c: val_i.c.clone() - lb.val.clone(), k: val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / a_ij.clone());
+                    let room = DeltaRational {
+                        c: val_i.c.clone() - lb.val.clone(),
+                        k: val_i.k.clone(),
+                        eps: BTreeMap::new(),
+                    }
+                    .scale(rat(1, 1) / a_ij.clone());
                     down = Some(down.map_or(room.clone(), |d| d.min_delta(room)));
                 }
             } else {
                 let neg = -a_ij;
                 if let Some(lb) = self.lower_bounds.get(&x_i) {
-                    let room = DeltaRational { c: val_i.c.clone() - lb.val.clone(), k: val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / neg.clone());
+                    let room = DeltaRational {
+                        c: val_i.c.clone() - lb.val.clone(),
+                        k: val_i.k.clone(),
+                        eps: BTreeMap::new(),
+                    }
+                    .scale(rat(1, 1) / neg.clone());
                     up = Some(up.map_or(room.clone(), |u| u.min_delta(room)));
                 }
                 if let Some(ub) = self.upper_bounds.get(&x_i) {
-                    let room = DeltaRational { c: ub.val.clone() - val_i.c.clone(), k: -val_i.k.clone(), eps: BTreeMap::new() }.scale(rat(1, 1) / neg.clone());
+                    let room = DeltaRational {
+                        c: ub.val.clone() - val_i.c.clone(),
+                        k: -val_i.k.clone(),
+                        eps: BTreeMap::new(),
+                    }
+                    .scale(rat(1, 1) / neg.clone());
                     down = Some(down.map_or(room.clone(), |d| d.min_delta(room)));
                 }
             }
@@ -725,15 +894,19 @@ impl LraSolver {
         let mut mover: Option<(usize, DeltaRational)> = None;
         for &x_j in &nb {
             let (up, down) = self.feasible_room(x_j);
-            let can_up = up.as_ref().is_none_or(DeltaRational::is_positive);
-            let can_down = down.as_ref().is_none_or(DeltaRational::is_positive);
-            if can_up || can_down { any_can_move = true; }
+            let can_up = up.as_ref().map_or(true, DeltaRational::is_positive);
+            let can_down = down.as_ref().map_or(true, DeltaRational::is_positive);
+            if can_up || can_down {
+                any_can_move = true;
+            }
             if mover.is_none() {
                 // r_j = d(sum)/d(x_j): coef propio + Σ_{v básica en coeffs} coef_v * tableau[v][x_j]
                 let mut r_j = coeffs.get(&x_j).cloned().unwrap_or_else(|| zero.clone());
                 for (&v, c_v) in &coeffs {
                     if let Some(row) = self.tableau.get(&v) {
-                        if let Some(a_vj) = row.get(&x_j) { r_j += c_v.clone() * a_vj.clone(); }
+                        if let Some(a_vj) = row.get(&x_j) {
+                            r_j += c_v.clone() * a_vj.clone();
+                        }
                     }
                 }
                 if r_j != zero {
@@ -741,26 +914,48 @@ impl LraSolver {
                     let delta = if can_up {
                         match up.clone() {
                             Some(r) if r.c > zero => DeltaRational::rational(r.c.min(one.clone())),
-                            Some(r) => DeltaRational { c: zero.clone(), k: r.k / rat(2, 1), eps: BTreeMap::new() },
+                            Some(r) => DeltaRational {
+                                c: zero.clone(),
+                                k: r.k / rat(2, 1),
+                                eps: BTreeMap::new(),
+                            },
                             None => DeltaRational::rational(one.clone()),
                         }
                     } else if can_down {
                         match down.clone() {
-                            Some(r) if r.c > zero => DeltaRational::rational(-(r.c.min(one.clone()))),
-                            Some(r) => DeltaRational { c: zero.clone(), k: -(r.k / rat(2, 1)), eps: BTreeMap::new() },
+                            Some(r) if r.c > zero => {
+                                DeltaRational::rational(-(r.c.min(one.clone())))
+                            }
+                            Some(r) => DeltaRational {
+                                c: zero.clone(),
+                                k: -(r.k / rat(2, 1)),
+                                eps: BTreeMap::new(),
+                            },
                             None => DeltaRational::rational(-one.clone()),
                         }
-                    } else { DeltaRational::zero() };
-                    if !delta.is_zero() { mover = Some((x_j, delta)); }
+                    } else {
+                        DeltaRational::zero()
+                    };
+                    if !delta.is_zero() {
+                        mover = Some((x_j, delta));
+                    }
                 }
             }
         }
         if let Some((x_j, delta)) = mover {
-            let val_j = self.assignment.get(&x_j).cloned().unwrap_or_else(DeltaRational::zero);
+            let val_j = self
+                .assignment
+                .get(&x_j)
+                .cloned()
+                .unwrap_or_else(DeltaRational::zero);
             self.update(x_j, val_j.add(&delta));
             return RepairResult::Moved;
         }
-        if any_can_move { RepairResult::Stuck } else { RepairResult::FrozenPolytope }
+        if any_can_move {
+            RepairResult::Stuck
+        } else {
+            RepairResult::FrozenPolytope
+        }
     }
 
     /// Guarda los orígenes de las cotas que congelan las variables de la desigualdad
@@ -769,8 +964,12 @@ impl LraSolver {
         self.disequality_freeze_origins.clear();
         let vars: Vec<usize> = self.disequalities[idx].0.keys().copied().collect();
         for v in vars {
-            if let Some(e) = self.bound_origins.get(&(v, true)) { self.disequality_freeze_origins.push(e.clone()); }
-            if let Some(e) = self.bound_origins.get(&(v, false)) { self.disequality_freeze_origins.push(e.clone()); }
+            if let Some(e) = self.bound_origins.get(&(v, true)) {
+                self.disequality_freeze_origins.push(e.clone());
+            }
+            if let Some(e) = self.bound_origins.get(&(v, false)) {
+                self.disequality_freeze_origins.push(e.clone());
+            }
         }
     }
 
@@ -805,21 +1004,27 @@ impl TheorySolver for LraSolver {
     fn assert(&mut self, expr: &Expr) {
         // ... (existing implementation)
         match expr {
-            Expr::Not(inner) => {
-                match &**inner {
-                    Expr::Le(lhs, rhs) => self.assert_internal(&Expr::Gt(lhs.clone(), rhs.clone()), expr),
-                    Expr::Ge(lhs, rhs) => self.assert_internal(&Expr::Lt(lhs.clone(), rhs.clone()), expr),
-                    Expr::Lt(lhs, rhs) => self.assert_internal(&Expr::Ge(lhs.clone(), rhs.clone()), expr),
-                    Expr::Gt(lhs, rhs) => self.assert_internal(&Expr::Le(lhs.clone(), rhs.clone()), expr),
-                    Expr::Eq(lhs, rhs) => {
-                        let mut coeffs = BTreeMap::new();
-                        let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
-                        let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
-                        self.disequalities.push((coeffs, -(c1 + c2), expr.clone()));
-                    }
-                    _ => {}
+            Expr::Not(inner) => match &**inner {
+                Expr::Le(lhs, rhs) => {
+                    self.assert_internal(&Expr::Gt(lhs.clone(), rhs.clone()), expr)
                 }
-            }
+                Expr::Ge(lhs, rhs) => {
+                    self.assert_internal(&Expr::Lt(lhs.clone(), rhs.clone()), expr)
+                }
+                Expr::Lt(lhs, rhs) => {
+                    self.assert_internal(&Expr::Ge(lhs.clone(), rhs.clone()), expr)
+                }
+                Expr::Gt(lhs, rhs) => {
+                    self.assert_internal(&Expr::Le(lhs.clone(), rhs.clone()), expr)
+                }
+                Expr::Eq(lhs, rhs) => {
+                    let mut coeffs = BTreeMap::new();
+                    let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
+                    let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
+                    self.disequalities.push((coeffs, -(c1 + c2), expr.clone()));
+                }
+                _ => {}
+            },
             _ => self.assert_internal(expr, expr),
         }
     }
@@ -844,10 +1049,17 @@ impl TheorySolver for LraSolver {
 
         let mut conflict = Vec::new();
         if let Some(x_i) = self.last_conflict_var {
-            let val_i = self.assignment.get(&x_i).cloned().unwrap_or_else(DeltaRational::zero);
+            let val_i = self
+                .assignment
+                .get(&x_i)
+                .cloned()
+                .unwrap_or_else(DeltaRational::zero);
             let is_lower_violated = if let Some(lb) = self.lower_bounds.get(&x_i) {
-                val_i.lt_rational(lb.val.clone()) || (lb.is_strict && val_i.le_rational(lb.val.clone()))
-            } else { false };
+                val_i.lt_rational(lb.val.clone())
+                    || (lb.is_strict && val_i.le_rational(lb.val.clone()))
+            } else {
+                false
+            };
 
             if let Some(expr) = self.bound_origins.get(&(x_i, is_lower_violated)) {
                 conflict.push(expr.clone());
@@ -856,7 +1068,11 @@ impl TheorySolver for LraSolver {
             if let Some(row) = self.tableau.get(&x_i) {
                 for (&x_j, a_ij) in row.iter() {
                     let a_ij_gt_0 = a_ij > &rat(0, 1);
-                    let needed_lower = if is_lower_violated { !a_ij_gt_0 } else { a_ij_gt_0 };
+                    let needed_lower = if is_lower_violated {
+                        !a_ij_gt_0
+                    } else {
+                        a_ij_gt_0
+                    };
                     if let Some(expr) = self.bound_origins.get(&(x_j, needed_lower)) {
                         conflict.push(expr.clone());
                     }
@@ -890,8 +1106,15 @@ impl LraSolver {
                 let slack = self.create_slack_var();
                 self.tableau.insert(slack, coeffs);
                 self.basic_vars.push(slack);
-                self.upper_bounds.insert(slack, Bound { val: -(c1 + c2), is_strict: false });
-                self.bound_origins.insert((slack, false), origin_expr.clone());
+                self.upper_bounds.insert(
+                    slack,
+                    Bound {
+                        val: -(c1 + c2),
+                        is_strict: false,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, false), origin_expr.clone());
             }
             Expr::Lt(lhs, rhs) => {
                 let mut coeffs = BTreeMap::new();
@@ -900,8 +1123,15 @@ impl LraSolver {
                 let slack = self.create_slack_var();
                 self.tableau.insert(slack, coeffs);
                 self.basic_vars.push(slack);
-                self.upper_bounds.insert(slack, Bound { val: -(c1 + c2), is_strict: true });
-                self.bound_origins.insert((slack, false), origin_expr.clone());
+                self.upper_bounds.insert(
+                    slack,
+                    Bound {
+                        val: -(c1 + c2),
+                        is_strict: true,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, false), origin_expr.clone());
             }
             Expr::Ge(lhs, rhs) => {
                 let mut coeffs = BTreeMap::new();
@@ -910,8 +1140,15 @@ impl LraSolver {
                 let slack = self.create_slack_var();
                 self.tableau.insert(slack, coeffs);
                 self.basic_vars.push(slack);
-                self.lower_bounds.insert(slack, Bound { val: -(c1 + c2), is_strict: false });
-                self.bound_origins.insert((slack, true), origin_expr.clone());
+                self.lower_bounds.insert(
+                    slack,
+                    Bound {
+                        val: -(c1 + c2),
+                        is_strict: false,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, true), origin_expr.clone());
             }
             Expr::Gt(lhs, rhs) => {
                 let mut coeffs = BTreeMap::new();
@@ -920,8 +1157,15 @@ impl LraSolver {
                 let slack = self.create_slack_var();
                 self.tableau.insert(slack, coeffs);
                 self.basic_vars.push(slack);
-                self.lower_bounds.insert(slack, Bound { val: -(c1 + c2), is_strict: true });
-                self.bound_origins.insert((slack, true), origin_expr.clone());
+                self.lower_bounds.insert(
+                    slack,
+                    Bound {
+                        val: -(c1 + c2),
+                        is_strict: true,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, true), origin_expr.clone());
             }
             Expr::Eq(lhs, rhs) => {
                 let mut coeffs = BTreeMap::new();
@@ -931,16 +1175,35 @@ impl LraSolver {
                 let slack = self.create_slack_var();
                 self.tableau.insert(slack, coeffs);
                 self.basic_vars.push(slack);
-                self.lower_bounds.insert(slack, Bound { val: bound.clone(), is_strict: false });
-                self.upper_bounds.insert(slack, Bound { val: bound, is_strict: false });
-                self.bound_origins.insert((slack, true), origin_expr.clone());
-                self.bound_origins.insert((slack, false), origin_expr.clone());
+                self.lower_bounds.insert(
+                    slack,
+                    Bound {
+                        val: bound.clone(),
+                        is_strict: false,
+                    },
+                );
+                self.upper_bounds.insert(
+                    slack,
+                    Bound {
+                        val: bound,
+                        is_strict: false,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, true), origin_expr.clone());
+                self.bound_origins
+                    .insert((slack, false), origin_expr.clone());
             }
             _ => {}
         }
     }
 
-    fn extract_coeffs(&mut self, expr: &Expr, scale: Rational, coeffs: &mut BTreeMap<usize, Rational>) -> Rational {
+    fn extract_coeffs(
+        &mut self,
+        expr: &Expr,
+        scale: Rational,
+        coeffs: &mut BTreeMap<usize, Rational>,
+    ) -> Rational {
         match expr {
             Expr::Int(i) => scale * int_rat(*i),
             Expr::Real(i, s) => scale * decimal_rat(*i, *s),
@@ -957,7 +1220,9 @@ impl LraSolver {
                 constant
             }
             Expr::Sub(args) => {
-                if args.is_empty() { return rat(0, 1); }
+                if args.is_empty() {
+                    return rat(0, 1);
+                }
                 let mut constant = self.extract_coeffs(&args[0], scale.clone(), coeffs);
                 for arg in &args[1..] {
                     // Subtrahend must be extracted with NEGATED scale so its *variables*
@@ -997,4 +1262,3 @@ impl LraSolver {
         }
     }
 }
-

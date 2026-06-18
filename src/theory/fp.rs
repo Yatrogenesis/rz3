@@ -577,7 +577,7 @@ fn sqrt_upper_bound(value: &BigInt) -> BigInt {
     if value.is_zero() {
         BigInt::zero()
     } else {
-        BigInt::one() << value.bits().div_ceil(2)
+        BigInt::one() << ((value.bits() + 1) / 2)
     }
 }
 

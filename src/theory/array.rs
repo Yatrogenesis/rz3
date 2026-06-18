@@ -51,7 +51,9 @@ impl ArraySolver {
             }
             Expr::Not(inner) => self.collect_terms(inner),
             Expr::And(args) | Expr::Or(args) | Expr::Add(args) => {
-                for arg in args { self.collect_terms(arg); }
+                for arg in args {
+                    self.collect_terms(arg);
+                }
             }
             _ => {}
         }
@@ -81,7 +83,7 @@ impl ArraySolver {
     /// Estos lemas se añaden al SAT solver para refinar el modelo.
     pub fn generate_lemmas(&mut self) -> Vec<Expr> {
         let mut lemmas = Vec::new();
-        
+
         // Axioma 1: (select (store a i v) i) = v
         for arr_expr in &self.arrays {
             if let Expr::Store(_a, i, v) = arr_expr {
@@ -92,7 +94,7 @@ impl ArraySolver {
                 }
             }
         }
-        
+
         // Axioma 2: i != j => (select (store a i v) j) = (select a j)
         // Solo instanciamos si ya existe un select sobre el store con un índice distinto
         for read_expr in &self.reads {
@@ -103,7 +105,7 @@ impl ArraySolver {
                     let select_a_j = Expr::Select(a.clone(), j.clone());
                     let select_store_j = Expr::Select(arr_ptr.clone(), j.clone());
                     let s_eq_s = Expr::Eq(Box::new(select_store_j), Box::new(select_a_j));
-                    
+
                     let lemma = Expr::Or(vec![i_eq_j, s_eq_s]);
                     if self.instantiated_axioms.insert(lemma.clone()) {
                         lemmas.push(lemma);
@@ -111,7 +113,7 @@ impl ArraySolver {
                 }
             }
         }
-        
+
         lemmas
     }
 }

@@ -21,7 +21,7 @@ It is not a drop-in replacement for Z3 — see **[Scope and limitations](#scope-
 | Layer | Status |
 |---|---|
 | CDCL SAT core (deterministic VSIDS, restarts) | stable |
-| **Linear arithmetic (LRA/LIA)** — exact Simplex, δ-rational strict bounds, lexicographic anti-cycling | **complete & terminating** |
+| **Linear arithmetic (LRA/LIA)** — exact Simplex, δ-rational strict bounds, lexicographic anti-cycling | production-oriented core; may return `Unknown` on unresolved degeneracy/budget limits |
 | Difference logic (negative-cycle detection) | complete |
 | Uninterpreted functions + equality (EUF, congruence closure) | stable |
 | Arrays (read-over-write) | core |
@@ -32,9 +32,10 @@ It is not a drop-in replacement for Z3 — see **[Scope and limitations](#scope-
 | Non-linear arithmetic | partial |
 | SMT-LIB 2.6 front-end (`set-logic`, `declare/define-fun`, `assert`, `check-sat`, `get-model`, `get-value`, `push`/`pop`, …) | subset |
 
-The **linear-arithmetic core is complete**: the feasibility Simplex terminates on every input
-(no `Unknown` from cycling), proven by a randomized termination test. This is the part of the
-solver intended for production use today.
+The **linear-arithmetic core is the most mature part of the solver**. It uses exact rationals,
+symbolic strict bounds and deterministic pivoting, and it includes regression tests for
+termination-sensitive cases. Some unresolved degenerate or disequality-heavy cases may still
+return `Unknown`; `Unknown` is treated as a sound non-answer, not as `Sat` or `Unsat`.
 
 ## Scope and limitations (vs. Z3)
 
@@ -47,6 +48,8 @@ the part of a large system that a given workload actually needs. Honestly, relat
 - **No optimization** (`maximize`/`minimize`, à la νZ).
 - **Partial proof/unsat-core/interpolation** support.
 - **A subset of SMT-LIB 2.6**, not the full standard.
+- **Some LRA cases can return `Unknown`.** This is intentional for unresolved pivot-budget or
+  disequality-repair cases; callers must handle `SolverResult::Unknown`.
 - **Less performance tuning.** Z3 has two decades of engineering; `rz3` favors correctness,
   exactness and determinism over raw speed.
 

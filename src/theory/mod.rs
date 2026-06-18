@@ -1,20 +1,20 @@
-pub mod lra;
-pub mod euf;
-pub mod bv;
 pub mod array;
+pub mod bv;
+pub mod euf;
+pub mod fp;
+pub mod lra;
+pub mod nla;
 pub mod quantifier;
 pub mod string;
-pub mod nla;
-pub mod fp;
 
-pub use lra::LraSolver;
-pub use euf::EufSolver;
-pub use bv::BitBlaster;
+pub use crate::ast::fp::{FloatSort, FloatValue, RoundingMode};
 pub use array::ArraySolver;
+pub use bv::BitBlaster;
+pub use euf::EufSolver;
+pub use lra::LraSolver;
+pub use nla::NlaSolver;
 pub use quantifier::QuantifierSolver;
 pub use string::StringSolver;
-pub use nla::NlaSolver;
-pub use crate::ast::fp::{FloatSort, FloatValue, RoundingMode};
 
 use crate::ast::{Expr, ModelValue};
 

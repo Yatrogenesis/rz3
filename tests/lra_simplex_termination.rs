@@ -9,16 +9,28 @@
 // unconditional, while preserving SAT/UNSAT in the limit ε→0. These tests pin the verdicts
 // AND fuzz-prove that no small LRA system returns Unknown.
 
-use rz3::Rz3Solver;
 use rz3::ast::{Expr, Type};
+use rz3::Rz3Solver;
 use rz3::SolverResult;
 
-fn rv(n: &str) -> Expr { Expr::Var(n.into(), Type::Real) }
-fn add(a: Expr, b: Expr) -> Expr { Expr::Add(vec![a, b]) }
-fn mul(c: i64, v: &str) -> Expr { Expr::Mul(vec![Expr::Int(c), rv(v)]) }
-fn gt(a: Expr, b: Expr) -> Expr { Expr::Gt(Box::new(a), Box::new(b)) }
-fn lt(a: Expr, b: Expr) -> Expr { Expr::Lt(Box::new(a), Box::new(b)) }
-fn i(n: i64) -> Expr { Expr::Int(n) }
+fn rv(n: &str) -> Expr {
+    Expr::Var(n.into(), Type::Real)
+}
+fn add(a: Expr, b: Expr) -> Expr {
+    Expr::Add(vec![a, b])
+}
+fn mul(c: i64, v: &str) -> Expr {
+    Expr::Mul(vec![Expr::Int(c), rv(v)])
+}
+fn gt(a: Expr, b: Expr) -> Expr {
+    Expr::Gt(Box::new(a), Box::new(b))
+}
+fn lt(a: Expr, b: Expr) -> Expr {
+    Expr::Lt(Box::new(a), Box::new(b))
+}
+fn i(n: i64) -> Expr {
+    Expr::Int(n)
+}
 
 #[test]
 fn multirow_nondl_unsat_terminates() {
@@ -28,7 +40,10 @@ fn multirow_nondl_unsat_terminates() {
     s.assert(&gt(add(rv("x"), mul(2, "y")), i(4)));
     s.assert(&gt(add(mul(2, "x"), rv("y")), i(4)));
     s.assert(&lt(add(rv("x"), rv("y")), i(2)));
-    assert!(matches!(s.check(), SolverResult::Unsat), "must be UNSAT, not Unknown");
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "must be UNSAT, not Unknown"
+    );
 }
 
 #[test]
@@ -45,8 +60,14 @@ fn pinned_equality_with_disequality_still_unsat() {
     // x==1 ∧ x≠1 → UNSAT. Guards that the perturbation does not un-pin equalities for ≠ checks.
     let mut s = Rz3Solver::new();
     s.assert(&Expr::Eq(Box::new(rv("x")), Box::new(i(1))));
-    s.assert(&Expr::Not(Box::new(Expr::Eq(Box::new(rv("x")), Box::new(i(1))))));
-    assert!(matches!(s.check(), SolverResult::Unsat), "x==1 ∧ x≠1 must be UNSAT");
+    s.assert(&Expr::Not(Box::new(Expr::Eq(
+        Box::new(rv("x")),
+        Box::new(i(1)),
+    ))));
+    assert!(
+        matches!(s.check(), SolverResult::Unsat),
+        "x==1 ∧ x≠1 must be UNSAT"
+    );
 }
 
 // ─────────────────── Fuzz: no small LRA system returns Unknown ───────────────────
@@ -54,8 +75,16 @@ fn pinned_equality_with_disequality_still_unsat() {
 // Deterministic LCG (seeded) — rz3 forbids unseeded rand; the test owns its randomness.
 struct Lcg(u64);
 impl Lcg {
-    fn next(&mut self) -> u64 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); self.0 >> 33 }
-    fn range(&mut self, lo: i64, hi: i64) -> i64 { lo + (self.next() as i64).rem_euclid(hi - lo + 1) }
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn range(&mut self, lo: i64, hi: i64) -> i64 {
+        lo + (self.next() as i64).rem_euclid(hi - lo + 1)
+    }
 }
 
 #[test]
@@ -73,22 +102,37 @@ fn fuzz_no_unknown_on_small_systems() {
             let mut form: Option<Expr> = None;
             for _ in 0..nv {
                 let v = vars[rng.range(0, 3) as usize];
-                let mut c = rng.range(-3, 3); if c == 0 { c = 1; }
+                let mut c = rng.range(-3, 3);
+                if c == 0 {
+                    c = 1;
+                }
                 let term = mul(c, v);
-                form = Some(match form { None => term, Some(f) => add(f, term) });
+                form = Some(match form {
+                    None => term,
+                    Some(f) => add(f, term),
+                });
             }
             let form = form.unwrap();
             let bound = i(rng.range(-5, 5));
-            let constraint = if rng.range(0, 1) == 0 { gt(form, bound) } else { lt(form, bound) };
+            let constraint = if rng.range(0, 1) == 0 {
+                gt(form, bound)
+            } else {
+                lt(form, bound)
+            };
             s.assert(&constraint);
         }
         match s.check() {
             SolverResult::Sat => sat += 1,
             SolverResult::Unsat => unsat += 1,
-            SolverResult::Unknown => panic!("fuzz: a small LRA system returned Unknown — non-termination"),
+            SolverResult::Unknown => {
+                panic!("fuzz: a small LRA system returned Unknown — non-termination")
+            }
         }
     }
     // Sanity: the corpus must exercise both verdicts (not all trivially one-sided).
-    assert!(sat > 0 && unsat > 0, "fuzz corpus degenerate: sat={sat} unsat={unsat}");
+    assert!(
+        sat > 0 && unsat > 0,
+        "fuzz corpus degenerate: sat={sat} unsat={unsat}"
+    );
     eprintln!("fuzz OK: {sat} SAT, {unsat} UNSAT, 0 Unknown over 400 random systems");
 }
