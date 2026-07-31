@@ -13,6 +13,18 @@ pub struct QuantifierSolver {
     pattern_index: BTreeMap<String, Vec<usize>>,
 }
 
+impl QuantifierSolver {
+    /// A live `ForAll` can never be CERTIFIED sat by finite E-matching/MBQI
+    /// instantiation — reaching a lemma fixpoint only means "no
+    /// counterexample found among the ground terms explored", not "true
+    /// over the whole domain". The top-level solver consults this right
+    /// before it would otherwise declare Sat (see RZ3-2: `check()` on this
+    /// theory was a bare `{ true }` and its result was never even consulted).
+    pub fn is_unknown(&self) -> bool {
+        !self.quantifiers.is_empty()
+    }
+}
+
 impl Default for QuantifierSolver {
     fn default() -> Self {
         Self::new()

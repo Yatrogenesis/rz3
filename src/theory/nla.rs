@@ -184,6 +184,14 @@ pub struct NlaSolver {
     constraints: Vec<Expr>,
     var_map: BTreeMap<String, usize>,
     next_var_idx: usize,
+    /// Set by `check()` when an asserted constraint has genuine nonlinear
+    /// content (total degree >= 2 in some term, e.g. `x*y` or `x^2`) that
+    /// the decidable shape-check below could not resolve either way. This
+    /// theory has no general decision procedure wired up (sturm_sequence /
+    /// resultant / project exist but are not invoked from `check()`), so
+    /// declining honestly to Unknown is the sound alternative to defaulting
+    /// to Sat (see the NLA soundness audit, RZ3-1).
+    is_unknown: bool,
 }
 
 impl Default for NlaSolver {
@@ -198,6 +206,7 @@ impl NlaSolver {
             constraints: Vec::new(),
             var_map: BTreeMap::new(),
             next_var_idx: 0,
+            is_unknown: false,
         }
     }
 
@@ -205,6 +214,13 @@ impl NlaSolver {
         self.constraints.clear();
         self.var_map.clear();
         self.next_var_idx = 0;
+        self.is_unknown = false;
+    }
+
+    /// Pivot/decision limit not applicable here (unlike LRA's Simplex) — this
+    /// flags genuinely undecided nonlinear content instead. See the field doc.
+    pub fn is_unknown(&self) -> bool {
+        self.is_unknown
     }
 
     fn get_var_idx(&mut self, name: &str) -> usize {
@@ -316,7 +332,8 @@ impl TheorySolver for NlaSolver {
     }
 
     fn check(&mut self) -> bool {
-        // ... (existing implementation)
+        self.is_unknown = false;
+
         if self.constraints.is_empty() {
             return true;
         }
@@ -352,7 +369,7 @@ impl TheorySolver for NlaSolver {
                 _ => {}
             }
         }
-        for (p, op) in polys_with_op {
+        for (p, op) in &polys_with_op {
             let mut all_even = true;
             let mut all_coeffs_non_neg = true;
             let mut has_const_pos = false;
@@ -367,18 +384,30 @@ impl TheorySolver for NlaSolver {
                     has_const_pos = true;
                 }
             }
-            if all_even && all_coeffs_non_neg && has_const_pos && op == "lt" {
+            if all_even && all_coeffs_non_neg && has_const_pos && *op == "lt" {
                 return false;
             }
             if all_even
                 && all_coeffs_non_neg
                 && has_const_pos
-                && op == "le"
+                && *op == "le"
                 && p.terms.values().all(|v| v >= &BigInt::from(0))
             {
                 return false;
             }
         }
+
+        // No conflict found by the decidable shape-check above. If any
+        // asserted constraint has genuine nonlinear content, this solver
+        // cannot certify satisfiability — decline instead of defaulting to
+        // Sat (see the `is_unknown` field doc and RZ3-1).
+        let has_undecided_nonlinear = polys_with_op
+            .iter()
+            .any(|(p, _)| p.terms.keys().any(|exps| exps.iter().sum::<u32>() >= 2));
+        if has_undecided_nonlinear {
+            self.is_unknown = true;
+        }
+
         true
     }
 
