@@ -625,7 +625,13 @@ impl Rz3Solver {
             let euf_ok = self.euf.check();
             let array_ok = self.array.check();
             let string_ok = self.string.check();
+            if self.string.is_unknown() {
+                return SolverResult::Unknown;
+            }
             let nla_ok = self.nla.check();
+            if self.nla.is_unknown() {
+                return SolverResult::Unknown;
+            }
             let fp_ok = self.fp.check();
 
             if lra_ok && euf_ok && array_ok && string_ok && nla_ok && fp_ok {
@@ -634,6 +640,16 @@ impl Rz3Solver {
                 let quant_lemmas = self.quant.generate_lemmas(&mut self.euf, &model);
                 let string_lemmas = self.string.generate_lemmas();
                 if array_lemmas.is_empty() && quant_lemmas.is_empty() && string_lemmas.is_empty() {
+                    // A live universally-quantified assertion can never be
+                    // CERTIFIED sat by finite E-matching/MBQI instantiation —
+                    // reaching a lemma fixpoint means "no counterexample found
+                    // among the ground terms explored", not "true for the
+                    // whole domain". Decline honestly instead of claiming Sat
+                    // (RZ3-2: `check()` on this theory was `{ true }` and its
+                    // result was never even consulted here).
+                    if self.quant.is_unknown() {
+                        return SolverResult::Unknown;
+                    }
                     return SolverResult::Sat;
                 } else {
                     for lemma in array_lemmas

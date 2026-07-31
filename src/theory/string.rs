@@ -7,6 +7,12 @@ pub struct StringSolver {
     instantiated_axioms: BTreeSet<Expr>,
     /// Nuevos lemas encontrados en esta pasada
     pending_lemmas: Vec<Expr>,
+    /// Set when an asserted constraint mentions `StrConcat`/`StrContains` —
+    /// real string operations `check()` below does not actually verify (it
+    /// only detects conflicting `str.len(s) = literal` equalities among its
+    /// own emitted length axioms). Declining to Unknown for these instead
+    /// of silently defaulting to Sat is the honest alternative (RZ3-3).
+    has_unverified_content: bool,
 }
 
 impl Default for StringSolver {
@@ -20,11 +26,17 @@ impl StringSolver {
         Self {
             instantiated_axioms: BTreeSet::new(),
             pending_lemmas: Vec::new(),
+            has_unverified_content: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.pending_lemmas.clear();
+        self.has_unverified_content = false;
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.has_unverified_content
     }
 
     fn collect_terms(&mut self, expr: &Expr) {
@@ -45,11 +57,13 @@ impl StringSolver {
                 self.pending_lemmas.push(axiom);
             }
             Expr::StrConcat(args) => {
+                self.has_unverified_content = true;
                 for arg in args {
                     self.collect_terms(arg);
                 }
             }
             Expr::StrContains(a, b) => {
+                self.has_unverified_content = true;
                 self.collect_terms(a);
                 self.collect_terms(b);
             }

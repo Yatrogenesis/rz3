@@ -4,6 +4,17 @@ use std::collections::BTreeMap;
 
 // REF: [Hadarean et al., 2014] DOI: 10.1007/978-3-319-08867-9_7
 
+/// Hard cap on bit-vector width `bit_blast` will expand. Width is an
+/// unconstrained `usize` on `Expr::BvConst`/`Type::BitVec` — with no bound,
+/// a single declared/constant bit-vector (e.g. from untrusted SMT-LIB input)
+/// can drive the `for i in 0..width` loops below to allocate one SAT
+/// variable + clause per bit with no upper limit, which is an OOM/DoS vector
+/// in memory-constrained targets (wasm32 in particular — see the RZ3-5
+/// soundness/hardening audit). 4096 bits comfortably covers realistic use
+/// (SHA-256 chains, RSA moduli well beyond typical register widths) while
+/// keeping a single term's expansion bounded.
+pub const MAX_BV_WIDTH: usize = 4096;
+
 pub struct BitBlaster<'a> {
     sat_solver: &'a mut CdclSolver,
     bv_vars: &'a mut BTreeMap<(String, usize), i32>,
@@ -41,6 +52,12 @@ impl<'a> BitBlaster<'a> {
         let simplified = self.word_level_simplify(expr);
         let bits = match simplified {
             Expr::BvConst(val, width) => {
+                assert!(
+                    width <= MAX_BV_WIDTH,
+                    "BvConst width {width} exceeds MAX_BV_WIDTH ({MAX_BV_WIDTH}) — refusing to \
+                     bit-blast (RZ3-5: unbounded expansion is an OOM/DoS vector, not a silently \
+                     truncated result)"
+                );
                 let mut b = Vec::new();
                 for i in 0..width {
                     let v = self.new_var();
@@ -54,6 +71,12 @@ impl<'a> BitBlaster<'a> {
                 b
             }
             Expr::Var(name, Type::BitVec(width)) => {
+                assert!(
+                    width <= MAX_BV_WIDTH,
+                    "BitVec width {width} for '{name}' exceeds MAX_BV_WIDTH ({MAX_BV_WIDTH}) — \
+                     refusing to bit-blast (RZ3-5: unbounded expansion is an OOM/DoS vector, not \
+                     a silently truncated result)"
+                );
                 let mut b = Vec::new();
                 for i in 0..width {
                     let v = *self.bv_vars.entry((name.clone(), i)).or_insert_with(|| {

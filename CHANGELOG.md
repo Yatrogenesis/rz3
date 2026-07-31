@@ -3,6 +3,43 @@
 All notable changes to `rz3` are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project follows semantic versioning.
 
+## [0.1.4] — 2026-07-30
+
+Soundness and hardening fixes for theory solvers that could previously return
+`Sat` outside their decidable fragment. No API breakage; the sound theories
+(LRA / EUF / DL / array / fp) are unchanged and their tests still pass.
+
+### Fixed
+- **Quantifier (RZ3-2):** the top-level solver could return `Sat` for a formula
+  with a live universal (`ForAll`) assertion — `QuantifierSolver::check()` was
+  `{ true }` and its result was never consulted. The solver now returns
+  `Unknown` when a universal remains after E-matching/MBQI reaches a lemma
+  fixpoint. A fixpoint means "no counterexample found among the explored ground
+  terms", not validity over the whole domain.
+- **Nonlinear arithmetic (RZ3-1):** `check()` decided only one narrow conflict
+  shape and otherwise let a `Sat` stand. Genuine nonlinear content (total
+  degree ≥ 2) that the decidable shape-check cannot resolve now yields
+  `Unknown` instead of an unverified `Sat`; no general nonlinear decision
+  procedure is wired into `check()`.
+- **Strings (RZ3-3):** `check()` verified only conflicting `str.len(s) = literal`
+  equalities among its own length axioms; `StrConcat` / `StrContains` were not
+  actually verified. Constraints mentioning those operations now yield `Unknown`.
+
+### Added
+- **Bit-vectors (RZ3-5):** `MAX_BV_WIDTH = 4096`. Bit-vector width was an
+  unbounded `usize`; a single wide `BvConst` / `BitVec` (e.g. from untrusted
+  SMT-LIB input) could drive `bit_blast` to emit one SAT variable and clause
+  per bit without limit — an out-of-memory / denial-of-service vector,
+  particularly on `wasm32`. `bit_blast` now refuses (asserts) above the cap
+  rather than expanding unboundedly.
+
+### Notes
+- `RZ3-4` (further nonlinear / quantifier / string completeness) is reported,
+  not addressed in this release.
+- Callers must continue to handle `SolverResult::Unknown`. These fixes increase
+  the cases in which it is returned, in exchange for no longer returning an
+  unsound `Sat`.
+
 ## [0.1.3] — 2026-06-18
 
 Crates.io documentation and release-hardening update.

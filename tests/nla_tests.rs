@@ -72,7 +72,7 @@ fn test_nla_basic_conflict() {
 }
 
 #[test]
-fn test_nla_sat() {
+fn test_nla_undecided_nonlinear_returns_unknown() {
     let mut solver = Rz3Solver::new();
     let x = Expr::Var("x".to_string(), Type::Real);
     let y = Expr::Var("y".to_string(), Type::Real);
@@ -82,6 +82,9 @@ fn test_nla_sat() {
 
     solver.assert(&constraint);
 
-    // As basic NLA doesn't know how to solve xy > 0, it should return Sat (no conflict found)
-    assert!(matches!(solver.check(), SolverResult::Sat));
+    // RZ3-1 fix: basic NLA has no decision procedure for `xy > 0` (no
+    // conflict found by the decidable shape-check, and the constraint is
+    // genuinely nonlinear). It must decline to Unknown rather than silently
+    // claim Sat with nothing to back that claim up.
+    assert!(matches!(solver.check(), SolverResult::Unknown));
 }
