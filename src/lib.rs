@@ -1395,6 +1395,20 @@ impl Rz3Solver {
                 };
                 if !lemmas.is_empty() {
                     nl_rounds += 1;
+                    // Irrational solutions (e.g. x*x = 2) make tangent points grow without
+                    // bound; give up early instead of burning time on huge rationals.
+                    let oversized = self.lin.monomials().iter().any(|mono| {
+                        [&mono.x, &mono.y].iter().any(|e| {
+                            matches!(
+                                crate::eval::eval(e, &model),
+                                Some(crate::eval::Value::Num(r))
+                                    if r.numer().bits() > 160 || r.denom().bits() > 160
+                            )
+                        })
+                    });
+                    if oversized {
+                        return self.unknown("nonlinear model values grew too large");
+                    }
                     if nl_rounds > MAX_NL_ROUNDS {
                         return self.unknown("nonlinear refinement budget exhausted");
                     }
