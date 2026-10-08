@@ -1,0 +1,172 @@
+//! Regression tests for the "silent weakening" defects found by the 2026-10 pilot
+//! benchmark: every case goes through the text path (strict parser -> solver) and
+//! compares against the verdict an independent solver (Z3 5.1.0) gives.
+//!
+//! `Unk` rows are cases RZ3 may legitimately decline; the invariant under test is
+//! that it never answers the *opposite* of the truth and never answers from a
+//! script it only partly understood.
+
+use rz3::driver::check_script;
+use rz3::SolverResult;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Want {
+    Sat,
+    Unsat,
+    /// Truth is unsat; `unknown` or an explicit error are acceptable, `sat` is not.
+    UnsatOrDecline,
+    /// A parse/unsupported error is required (no verdict at all).
+    Error,
+}
+
+const HEAD: &str = "(set-logic ALL)(declare-fun a () Int)(declare-fun b () Int)(declare-fun c () Int)\
+(declare-fun x () Real)(declare-fun y () Real)(declare-fun p () (_ BitVec 8))(declare-fun q () (_ BitVec 8))\
+(declare-fun m () Bool)(declare-fun n () Bool)(declare-fun f (Int) Int)(declare-fun pr (Int) Bool)";
+
+fn verdict(body: &str) -> Result<SolverResult, String> {
+    let script = format!("{HEAD}{body}(check-sat)");
+    check_script(&script).map(|mut v| v.remove(0))
+}
+
+fn check(name: &str, body: &str, want: Want) -> Option<String> {
+    let got = verdict(body);
+    let ok = matches!(
+        (want, &got),
+        (Want::Sat, Ok(SolverResult::Sat))
+            | (Want::Unsat, Ok(SolverResult::Unsat))
+            | (
+                Want::UnsatOrDecline,
+                Ok(SolverResult::Unsat | SolverResult::Unknown)
+            )
+            | (Want::UnsatOrDecline, Err(_))
+            | (Want::Error, Err(_))
+    );
+    if ok {
+        None
+    } else {
+        Some(format!("{name}: wanted {want:?}, got {got:?}\n    {body}"))
+    }
+}
+
+#[test]
+fn text_path_never_weakens_a_formula() {
+    use Want::*;
+    let cases: &[(&str, &str, Want)] = &[
+        // difference form was turned into an unconstrained application
+        ("difference chain", "(assert (<= (- a b) 0))(assert (<= (- b c) 0))(assert (> (- a c) 0))", Unsat),
+        ("difference chain sat", "(assert (<= (- a b) 0))(assert (<= (- b c) 0))(assert (<= (- a c) 0))", Sat),
+        ("unary minus", "(assert (> (- x) 1.0))(assert (> x 0.0))", Unsat),
+        ("distinct 3-ary", "(assert (distinct a b c))(assert (= a b))", Unsat),
+        ("distinct sat", "(assert (distinct a b c))", Sat),
+        ("chained =", "(assert (= m n m))(assert m)(assert (not n))", Unsat),
+        ("chained <=", "(assert (<= a b c))(assert (> a c))", Unsat),
+        ("implication", "(assert (=> m n))(assert m)(assert (not n))", Unsat),
+        ("xor", "(assert (xor m m))", Unsat),
+        ("xor sat", "(assert (xor m n))(assert m)", Sat),
+        // let / define-fun / declare-const used to be dropped or opaque
+        ("let", "(assert (let ((y1 (+ a 1))) (and (> y1 5) (< y1 0))))", Unsat),
+        ("let shadowing", "(assert (let ((a 1)) (let ((a 2)) (= a 3))))", Unsat),
+        ("define-fun constant", "(define-fun k () Int 5)(assert (> k 10))", Unsat),
+        ("define-fun with parameter", "(define-fun dbl ((u Int)) Int (+ u u))(assert (= (dbl a) 7))", Unsat),
+        ("define-fun sat", "(define-fun dbl ((u Int)) Int (+ u u))(assert (= (dbl a) 8))(assert (= a 4))", Sat),
+        ("declare-const", "(declare-const z Int)(assert (> z 1))(assert (< z 0))", Unsat),
+        // hex / binary literals
+        ("hex literal", "(assert (= p #xff))(assert (= p #x00))", Unsat),
+        ("hex literal sat", "(assert (= p #xff))(assert (= q (bvadd p #x01)))(assert (= q #x00))", Sat),
+        ("(_ bvN w)", "(assert (= p (_ bv255 8)))(assert (= p (_ bv0 8)))", Unsat),
+        // integers
+        ("integer strictness", "(assert (> a 0))(assert (< a 1))", Unsat),
+        ("integer parity", "(assert (= (* 2 a) 1))", Unsat),
+        ("integer difference gap", "(assert (> (- a b) 0))(assert (< (- a b) 1))", Unsat),
+        ("integer sat", "(assert (> (* 2 a) 1))(assert (< (* 2 a) 3))", Sat),
+        // ite / division
+        ("ite arithmetic", "(assert (> (ite (> x 0.0) 1.0 2.0) 5.0))", Unsat),
+        ("ite bool", "(assert (ite m n (not n)))(assert m)(assert (not n))", Unsat),
+        ("division by constant", "(assert (> (/ x 2.0) 1.0))(assert (< x 1.0))", Unsat),
+        // incompletely-supported theories must decline, never answer sat
+        ("nonlinear", "(assert (< (* x x) 0.0))", UnsatOrDecline),
+        ("division by variable", "(assert (< (/ 1.0 x) 0.0))(assert (> x 0.0))", UnsatOrDecline),
+        // bit-vectors
+        ("bvmul", "(assert (= (bvmul p #x02) #x01))", Unsat),
+        ("bvult", "(assert (bvult p #x00))", Unsat),
+        ("bvule sat", "(assert (bvule p #x00))", Sat),
+        ("bvugt", "(assert (bvugt p #xff))", Unsat),
+        ("bvslt", "(assert (bvslt p #x80))", Unsat),
+        ("bvsgt sat", "(assert (bvsgt p #x7f))", Unsat),
+        ("bvshl", "(assert (= (bvshl p #x01) #x01))", Unsat),
+        ("bvshl by width", "(assert (= p #x01))(assert (not (= (bvshl p #x08) #x00)))", Unsat),
+        ("bvlshr", "(assert (= p #x80))(assert (not (= (bvlshr p #x07) #x01)))", Unsat),
+        ("bvashr", "(assert (= p #x80))(assert (not (= (bvashr p #x07) #xff)))", Unsat),
+        ("bvsub", "(assert (= p #x00))(assert (not (= (bvsub p #x01) #xff)))", Unsat),
+        ("bvand/or/xor", "(assert (= p #xaa))(assert (not (= (bvxor p (bvand p #x0f)) #xa0)))", Unsat),
+        ("bvnot", "(assert (= p #x0f))(assert (not (= (bvnot p) #xf0)))", Unsat),
+        ("extract/concat", "(assert (= p #xa5))(assert (not (= (concat ((_ extract 3 0) p) ((_ extract 7 4) p)) #x5a)))", Unsat),
+        ("bv ite", "(assert (= p (ite m #x01 #x02)))(assert (= p #x03))", Unsat),
+        // equations that an old tactic dropped
+        ("conflicting definitions", "(assert (and (= a 1) (= a 2)))", Unsat),
+        ("cyclic definitions", "(assert (and (= a (+ b 1)) (= b (+ a 1))))", Unsat),
+        // uninterpreted functions with arithmetic arguments
+        ("congruence over arithmetic", "(assert (= a b))(assert (not (= (f (+ a 1)) (f (+ b 1)))))", Unsat),
+        ("predicate congruence", "(assert (= a b))(assert (pr (+ a 1)))(assert (not (pr (+ b 1))))", Unsat),
+        ("function sat", "(assert (not (= (f a) (f b))))", Sat),
+        ("distinct on applications", "(assert (distinct (f a) (f b) (f c)))(assert (= a b))", Unsat),
+        // front end must reject, not guess
+        ("undeclared symbol", "(assert (> zz 1))", Error),
+        ("unsupported operator mod", "(assert (= (mod a 2) 5))", Error),
+        ("numeral beyond 64 bits", "(assert (> a 99999999999999999999))(assert (< a 0))", Error),
+        ("unknown command", "(echo \"x\")(declare-datatypes ())", Error),
+        ("bit-vector wider than 64", "(declare-fun w () (_ BitVec 128))(assert (= w w))", Error),
+        ("wrong arity", "(assert (= (f a b) 1))", Error),
+        ("malformed let", "(assert (let ((a)) true))", Error),
+        ("unbalanced input", "(assert (> a 0)", Error),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, body, want)| check(name, body, *want))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn partial_scripts_never_yield_a_verdict() {
+    // The old CLI stopped at the first command it could not parse and then answered
+    // `sat` for the prefix it had read.
+    for script in [
+        "(declare-fun a () Int)(assert (> a 1))(get-info :name)(foo)(assert (< a 0))(check-sat)",
+        "(declare-fun a () Int)(assert (> a 1))(assert (< a 0)",
+        "(declare-fun a () Int)(assert (> a 1)) # (assert (< a 0))(check-sat)",
+    ] {
+        assert!(check_script(script).is_err(), "must be an error: {script}");
+    }
+}
+
+#[test]
+fn incremental_scopes_agree_with_truth() {
+    let script = "(declare-fun a () Int)(assert (> a 0))(push 1)(assert (< a 1))(check-sat)(pop 1)\
+(check-sat)(push 1)(assert (> a 5))(check-sat)(pop 1)(check-sat)";
+    let got = check_script(script).unwrap();
+    assert_eq!(
+        got,
+        vec![
+            SolverResult::Unsat,
+            SolverResult::Sat,
+            SolverResult::Sat,
+            SolverResult::Sat
+        ]
+    );
+}
+
+#[test]
+fn verdicts_are_deterministic() {
+    let body = "(assert (or (and (distinct a b c) (> (- b a) 0)) (not (distinct a b c))))\
+(assert (= (f a) (f c)))(assert (bvult p q))(assert (> (* 3 a) b))";
+    let first = format!("{:?}", verdict(body));
+    for _ in 0..30 {
+        assert_eq!(format!("{:?}", verdict(body)), first);
+    }
+}

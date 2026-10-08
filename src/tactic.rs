@@ -1,5 +1,4 @@
 use crate::ast::Expr;
-use std::collections::BTreeMap;
 
 pub trait Tactic {
     fn apply(&self, expr: Expr) -> Expr;
@@ -15,41 +14,16 @@ impl Tactic for Simplifier {
 pub struct SolveEqs;
 
 impl Tactic for SolveEqs {
+    /// Equation solving is deliberately a no-op.
+    ///
+    /// The previous implementation removed every top-level `x = term` conjunct and
+    /// substituted into the rest through a map keyed by variable. That is only sound
+    /// for a single, acyclic definition per variable: `x=1 ∧ x=2` lost one equation
+    /// (answered sat), and `x=y+1 ∧ y=x+1` (or `a=b ∧ b=c ∧ a ∧ ¬c`) lost both
+    /// (answered sat). Eliminating equations is an optimisation, never a requirement;
+    /// the SAT/theory loop handles them directly.
     fn apply(&self, expr: Expr) -> Expr {
-        match expr {
-            Expr::And(args) => {
-                let mut substs = BTreeMap::new();
-                let mut remaining = Vec::new();
-                for arg in args {
-                    if let Expr::Eq(a, b) = &arg {
-                        let (var, term) = match (&**a, &**b) {
-                            (Expr::Var(name, _), term) if !term.contains_var(name) => {
-                                (name.clone(), term.clone())
-                            }
-                            (term, Expr::Var(name, _)) if !term.contains_var(name) => {
-                                (name.clone(), term.clone())
-                            }
-                            _ => {
-                                remaining.push(arg);
-                                continue;
-                            }
-                        };
-                        substs.insert(var, term);
-                    } else {
-                        remaining.push(arg);
-                    }
-                }
-                if substs.is_empty() {
-                    return Expr::And(remaining);
-                }
-                let mut finalized = Vec::new();
-                for expr in remaining {
-                    finalized.push(expr.substitute(&substs));
-                }
-                Expr::And(finalized)
-            }
-            _ => expr,
-        }
+        expr
     }
 }
 

@@ -28,6 +28,8 @@
 //! ```
 //!
 pub mod ast;
+pub mod driver;
+pub mod eval;
 pub mod parser;
 pub mod proof;
 pub mod sat;
@@ -75,6 +77,18 @@ pub struct Rz3Solver {
     assertion_history: Vec<Expr>,
     /// Stack of assertion_history lengths at each push() call.
     scope_stack: Vec<usize>,
+    /// Set when an asserted formula contains something no theory interprets (for
+    /// example a bit-vector operator the bit-blaster does not encode, or an
+    /// application of an undeclared function). A satisfiable verdict is then not
+    /// trustworthy, so `check()` answers `Unknown` instead of `Sat`.
+    incomplete: bool,
+    /// Ackermann reduction: application (with already-reduced arguments) -> fresh variable.
+    app_vars: BTreeMap<Expr, Expr>,
+    /// Per function symbol, the applications seen so far (for pairwise congruence lemmas).
+    app_by_fn: BTreeMap<String, Vec<(Vec<Expr>, Expr)>>,
+    /// Every formula handed to the theories (after `ite` lifting, Ackermann reduction and
+    /// simplification). A satisfiable verdict is certified by evaluating all of them.
+    processed: Vec<Expr>,
 }
 
 impl Default for Rz3Solver {
@@ -107,6 +121,10 @@ impl Rz3Solver {
             proof_gen: crate::proof::Proof::new(),
             assertion_history: Vec::new(),
             scope_stack: Vec::new(),
+            incomplete: false,
+            app_vars: BTreeMap::new(),
+            app_by_fn: BTreeMap::new(),
+            processed: Vec::new(),
         }
     }
 
@@ -147,6 +165,10 @@ impl Rz3Solver {
         self.nla = NlaSolver::new();
         self.fp = FpSolver::new();
         self.proof_gen = crate::proof::Proof::new();
+        self.incomplete = false;
+        self.app_vars = BTreeMap::new();
+        self.app_by_fn = BTreeMap::new();
+        self.processed = Vec::new();
 
         self.symbol_table = sym;
         self.assertion_history = history;
@@ -159,6 +181,13 @@ impl Rz3Solver {
 
     fn assert_no_track(&mut self, expr: &Expr) {
         let typed = self.resolve_expr_types(expr);
+        let typed = self.lift_ite(&typed);
+        let mut lemmas = Vec::new();
+        let typed = self.ackermannize(&typed, &mut lemmas);
+        for lemma in lemmas {
+            self.assert_no_track(&lemma);
+        }
+        self.scan_support(&typed);
         let simplified = self.tactic_engine.apply(typed);
         if let Expr::Bool(true) = simplified {
             return;
@@ -167,6 +196,7 @@ impl Rz3Solver {
             self.sat_solver.ok = false;
             return;
         }
+        self.processed.push(simplified.clone());
         self.lra.assert(&simplified);
         self.euf.assert(&simplified);
         self.array.assert(&simplified);
@@ -176,6 +206,154 @@ impl Rz3Solver {
         self.fp.assert(&simplified);
         let lit = self.tseitin(&simplified);
         let _ = self.sat_solver.add_clause(vec![lit]);
+    }
+
+    /// Replace every `ite` by plain boolean structure so that no theory ever sees one.
+    ///
+    /// * boolean `ite(c, t, e)`  ->  `(c /\ t) \/ (!c /\ e)`
+    /// * a term-level `ite` inside an atom is split on its condition:
+    ///   `A[ite(c, t, e)]  ->  (c /\ A[t]) \/ (!c /\ A[e])`
+    ///
+    /// Without this the arithmetic and bit-vector encoders treated an `ite` term as an
+    /// unconstrained fresh variable and reported satisfiable.
+    fn lift_ite(&self, expr: &Expr) -> Expr {
+        match expr {
+            Expr::And(_) | Expr::Or(_) | Expr::Not(_) | Expr::Implies(_, _) => {
+                expr.map_children(&mut |c| self.lift_ite(c))
+            }
+            Expr::ForAll(_, _) | Expr::Exists(_, _) => expr.clone(),
+            Expr::Eq(a, b)
+                if self.infer_type(a) == Some(Type::Bool)
+                    && self.infer_type(b) == Some(Type::Bool) =>
+            {
+                expr.map_children(&mut |c| self.lift_ite(c))
+            }
+            Expr::Ite(c, t, e) if self.infer_type(t) == Some(Type::Bool) => {
+                let c = self.lift_ite(c);
+                let t = self.lift_ite(t);
+                let e = self.lift_ite(e);
+                Expr::Or(vec![
+                    Expr::And(vec![c.clone(), t]),
+                    Expr::And(vec![Expr::Not(Box::new(c)), e]),
+                ])
+            }
+            _ => {
+                let Some(target) = Self::first_ite(expr) else {
+                    return expr.clone();
+                };
+                let Expr::Ite(c, t, e) = &target else {
+                    return expr.clone();
+                };
+                let with_t = Self::replace_term(expr, &target, t);
+                let with_e = Self::replace_term(expr, &target, e);
+                self.lift_ite(&Expr::Or(vec![
+                    Expr::And(vec![(**c).clone(), with_t]),
+                    Expr::And(vec![Expr::Not(c.clone()), with_e]),
+                ]))
+            }
+        }
+    }
+
+    fn first_ite(expr: &Expr) -> Option<Expr> {
+        if matches!(expr, Expr::Ite(_, _, _)) {
+            return Some(expr.clone());
+        }
+        let mut found = None;
+        expr.map_children(&mut |c| {
+            if found.is_none() {
+                found = Self::first_ite(c);
+            }
+            c.clone()
+        });
+        found
+    }
+
+    fn replace_term(expr: &Expr, target: &Expr, with: &Expr) -> Expr {
+        if expr == target {
+            return with.clone();
+        }
+        expr.map_children(&mut |c| Self::replace_term(c, target, with))
+    }
+
+    /// Ackermann reduction of declared function symbols.
+    ///
+    /// Each application `f(t1..tn)` becomes a fresh variable and, for every earlier
+    /// application `f(s1..sn)`, the lemma `(s1 = t1 /\ ..) -> f(s) = f(t)` is added.
+    /// This keeps uninterpreted functions exact when their arguments or results are
+    /// arithmetic or bit-vector terms, which the equality-only congruence closure
+    /// cannot relate (it treated `f(a+1)` and `f(b+1)` as unrelated even if `a = b`).
+    fn ackermannize(&mut self, expr: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        if matches!(expr, Expr::ForAll(_, _) | Expr::Exists(_, _)) {
+            return expr.clone();
+        }
+        let rebuilt = expr.map_children(&mut |c| self.ackermannize(c, lemmas));
+        if let Expr::App(name, args) = &rebuilt {
+            if let Some(Type::Fn(params, ret)) = self.symbol_table.get(name).cloned() {
+                if params.len() == args.len() {
+                    return self.application_variable(name, args, &ret, lemmas);
+                }
+            }
+        }
+        rebuilt
+    }
+
+    fn application_variable(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        ret: &Type,
+        lemmas: &mut Vec<Expr>,
+    ) -> Expr {
+        let key = Expr::App(name.to_string(), args.to_vec());
+        if let Some(var) = self.app_vars.get(&key) {
+            return var.clone();
+        }
+        let var = Expr::Var(
+            format!("__ack_{}_{}", name, self.app_vars.len()),
+            ret.clone(),
+        );
+        let earlier = self.app_by_fn.get(name).cloned().unwrap_or_default();
+        for (earlier_args, earlier_var) in earlier {
+            let same_args: Vec<Expr> = earlier_args
+                .iter()
+                .zip(args)
+                .map(|(p, a)| Expr::Eq(Box::new(p.clone()), Box::new(a.clone())))
+                .collect();
+            let premise = if same_args.len() == 1 {
+                same_args[0].clone()
+            } else {
+                Expr::And(same_args)
+            };
+            lemmas.push(Expr::Or(vec![
+                Expr::Not(Box::new(premise)),
+                Expr::Eq(Box::new(earlier_var), Box::new(var.clone())),
+            ]));
+        }
+        self.app_by_fn
+            .entry(name.to_string())
+            .or_default()
+            .push((args.to_vec(), var.clone()));
+        self.app_vars.insert(key, var.clone());
+        var
+    }
+
+    /// Flag formulas that contain constructs no theory interprets.
+    fn scan_support(&mut self, expr: &Expr) {
+        let symbols = &self.symbol_table;
+        let unsupported = expr.any_subterm(&|e| match e {
+            Expr::App(name, args) => {
+                let declared = name == "fp"
+                    || name.starts_with("fp.")
+                    || matches!(symbols.get(name), Some(Type::Fn(_, _)));
+                // Bit-vector arguments live in the SAT core; EUF cannot relate them.
+                let bv_arg = args.iter().any(|a| matches!(a.get_type(), Type::BitVec(_)));
+                !declared || (bv_arg && !name.starts_with("fp"))
+            }
+            _ => false,
+        });
+        if unsupported {
+            self.incomplete = true;
+        }
     }
 
     pub fn declare_fun(&mut self, name: String, ty: Type) {
@@ -364,6 +542,14 @@ impl Rz3Solver {
     }
 
     pub fn get_model(&self) -> BTreeMap<String, ModelValue> {
+        let mut model = self.raw_model();
+        model.retain(|name, _| !name.starts_with("__ack_"));
+        model
+    }
+
+    /// The model including the solver's internal variables (Ackermann application
+    /// variables), which formulas handed to the theories refer to.
+    fn raw_model(&self) -> BTreeMap<String, ModelValue> {
         let mut model = BTreeMap::new();
 
         // Bool variables from SAT assignments
@@ -526,38 +712,28 @@ impl Rz3Solver {
                 self.tseitin(&not_a_or_b)
             }
             Expr::Lt(_a, _b) | Expr::Gt(_a, _b) => self.get_or_create_lit(expr),
+            Expr::BvUle(_, _) | Expr::BvUlt(_, _) | Expr::BvSle(_, _) | Expr::BvSlt(_, _) => {
+                self.bv_predicate(expr)
+            }
             Expr::Eq(a, b) => {
                 if self.is_bv(a) || self.is_bv(b) {
-                    let mut blaster = crate::theory::bv::BitBlaster::new(
-                        &mut self.sat_solver,
-                        &mut self.bv_vars,
-                        &mut self.bv_expr_to_bits,
-                        &mut self.next_sat_var,
-                    );
-                    let bits_a = blaster.bit_blast(a);
-                    let bits_b = blaster.bit_blast(b);
-                    let res_lit = self.get_or_create_lit(expr);
-
-                    let mut bit_eqs = Vec::new();
-                    for (la, lb) in bits_a.into_iter().zip(bits_b) {
-                        let eq = self.next_sat_var;
-                        self.next_sat_var += 1;
-                        self.sat_solver.add_clause(vec![-la, lb, -eq]);
-                        self.sat_solver.add_clause(vec![la, -lb, -eq]);
-                        self.sat_solver.add_clause(vec![la, lb, eq]);
-                        self.sat_solver.add_clause(vec![-la, -lb, eq]);
-                        bit_eqs.push(eq);
-                    }
-
-                    for &eq in &bit_eqs {
-                        self.sat_solver.add_clause(vec![-res_lit, eq]);
-                    }
-                    let mut final_clause = bit_eqs.iter().map(|&l| -l).collect::<Vec<_>>();
-                    final_clause.push(res_lit);
-                    self.sat_solver.add_clause(final_clause);
-                    res_lit
+                    // Encoded entirely in the SAT core; the arithmetic/EUF theories must
+                    // not see (and mis-abstract) bit-vector terms.
+                    self.bv_predicate(expr)
                 } else if self.infer_type(a) == Some(Type::Bool) {
-                    let res_lit = self.get_or_create_lit(expr);
+                    // Equivalence of two formulas is purely propositional. It must not be
+                    // registered as an atom: the arithmetic/EUF theories would receive an
+                    // `=` between formulas and treat the operands as opaque terms.
+                    // Equalities between Boolean *terms* (variables, applications) are
+                    // different: congruence closure needs to see them.
+                    let term_like = |e: &Expr| matches!(e, Expr::Var(_, _) | Expr::App(_, _));
+                    let res_lit = if term_like(a) && term_like(b) {
+                        self.get_or_create_lit(expr)
+                    } else {
+                        let fresh = self.next_sat_var;
+                        self.next_sat_var += 1;
+                        fresh
+                    };
                     let lit_a = self.tseitin(a);
                     let lit_b = self.tseitin(b);
                     self.sat_solver.add_clause(vec![lit_a, -lit_b, -res_lit]);
@@ -566,14 +742,52 @@ impl Rz3Solver {
                     self.sat_solver.add_clause(vec![lit_a, lit_b, res_lit]);
                     res_lit
                 } else {
-                    self.get_or_create_lit(expr)
+                    let fresh = !self.expr_to_lit.contains_key(expr);
+                    let lit = self.get_or_create_lit(expr);
+                    // Trichotomy for arithmetic equalities: `a = b \/ a < b \/ a > b`.
+                    // A negated equality then always carries a strict bound, so the
+                    // simplex never has to repair a bare disequality (it gives up with
+                    // Unknown on unbounded ones).
+                    if fresh && matches!(self.infer_type(a), Some(Type::Int | Type::Real)) {
+                        let lt = self.get_or_create_lit(&Expr::Lt(a.clone(), b.clone()));
+                        let gt = self.get_or_create_lit(&Expr::Gt(a.clone(), b.clone()));
+                        self.sat_solver.add_clause(vec![lit, lt, gt]);
+                    }
+                    lit
                 }
             }
             _ => self.get_or_create_lit(expr),
         }
     }
 
+    /// SAT literal for a bit-vector comparison/equality. If the encoder cannot express
+    /// it, a free literal is returned and the solver is flagged incomplete (no Sat).
+    fn bv_predicate(&mut self, expr: &Expr) -> i32 {
+        let mut blaster = crate::theory::bv::BitBlaster::new(
+            &mut self.sat_solver,
+            &mut self.bv_vars,
+            &mut self.bv_expr_to_bits,
+            &mut self.next_sat_var,
+        );
+        let lit = blaster.predicate(expr);
+        let unsupported = blaster.unsupported;
+        if unsupported {
+            self.incomplete = true;
+        }
+        match lit {
+            Some(l) => l,
+            None => {
+                let fresh = self.next_sat_var;
+                self.next_sat_var += 1;
+                fresh
+            }
+        }
+    }
+
     pub fn check(&mut self) -> SolverResult {
+        // Branch-and-bound lemmas added for integer variables in this call.
+        const MAX_BRANCHES: usize = 200;
+        let mut branches = 0usize;
         loop {
             if !self.sat_solver.solve() {
                 return SolverResult::Unsat;
@@ -635,6 +849,27 @@ impl Rz3Solver {
             let fp_ok = self.fp.check();
 
             if lra_ok && euf_ok && array_ok && string_ok && nla_ok && fp_ok {
+                // The simplex works over the rationals. An `Int` variable with a
+                // fractional value is not a model: split on it (branch and bound).
+                if let Some((name, value)) = self.lra.non_integral_int_vars().into_iter().next() {
+                    branches += 1;
+                    if branches > MAX_BRANCHES {
+                        return SolverResult::Unknown;
+                    }
+                    let Some(low) = num_traits::ToPrimitive::to_i64(&value.floor().to_integer())
+                    else {
+                        return SolverResult::Unknown;
+                    };
+                    let Some(high) = low.checked_add(1) else {
+                        return SolverResult::Unknown;
+                    };
+                    let x = Expr::Var(name, Type::Int);
+                    self.assert(&Expr::Or(vec![
+                        Expr::Le(Box::new(x.clone()), Box::new(Expr::Int(low))),
+                        Expr::Ge(Box::new(x), Box::new(Expr::Int(high))),
+                    ]));
+                    continue;
+                }
                 let model = self.get_model();
                 let array_lemmas = self.array.generate_lemmas();
                 let quant_lemmas = self.quant.generate_lemmas(&mut self.euf, &model);
@@ -648,6 +883,22 @@ impl Rz3Solver {
                     // (RZ3-2: `check()` on this theory was `{ true }` and its
                     // result was never even consulted here).
                     if self.quant.is_unknown() {
+                        return SolverResult::Unknown;
+                    }
+                    // A term was abstracted or never interpreted: Sat is unproven.
+                    if self.incomplete || self.lra.is_abstracted() {
+                        return SolverResult::Unknown;
+                    }
+                    // Independent certification: the extracted model must satisfy every
+                    // formula the theories were given. If it does not, the verdict is not
+                    // reported (that would be a wrong Sat); formulas the evaluator cannot
+                    // interpret (arrays, strings, floating point, ...) are not judged.
+                    let full_model = self.raw_model();
+                    if self
+                        .processed
+                        .iter()
+                        .any(|f| crate::eval::holds(f, &full_model) == crate::eval::Verdict::False)
+                    {
                         return SolverResult::Unknown;
                     }
                     return SolverResult::Sat;
@@ -671,8 +922,9 @@ impl Rz3Solver {
                                 conflict.clone(),
                                 "LRA".to_string(),
                             ));
-                        self.learn_conflict(&conflict);
-                        explanation_found = true;
+                        if self.learn_conflict(&conflict) {
+                            explanation_found = true;
+                        }
                     }
                 }
                 if !euf_ok {
@@ -683,8 +935,9 @@ impl Rz3Solver {
                                 conflict.clone(),
                                 "EUF".to_string(),
                             ));
-                        self.learn_conflict(&conflict);
-                        explanation_found = true;
+                        if self.learn_conflict(&conflict) {
+                            explanation_found = true;
+                        }
                     }
                 }
                 if !nla_ok {
@@ -695,8 +948,9 @@ impl Rz3Solver {
                                 conflict.clone(),
                                 "NLA".to_string(),
                             ));
-                        self.learn_conflict(&conflict);
-                        explanation_found = true;
+                        if self.learn_conflict(&conflict) {
+                            explanation_found = true;
+                        }
                     }
                 }
                 if !fp_ok {
@@ -707,8 +961,9 @@ impl Rz3Solver {
                                 conflict.clone(),
                                 "FP".to_string(),
                             ));
-                        self.learn_conflict(&conflict);
-                        explanation_found = true;
+                        if self.learn_conflict(&conflict) {
+                            explanation_found = true;
+                        }
                     }
                 }
 
@@ -741,9 +996,9 @@ impl Rz3Solver {
         }
     }
 
-    fn learn_conflict(&mut self, conflict: &[Expr]) {
+    fn learn_conflict(&mut self, conflict: &[Expr]) -> bool {
         if conflict.is_empty() {
-            return;
+            return false;
         }
         let mut clause = Vec::new();
         for expr in conflict {
@@ -753,10 +1008,20 @@ impl Rz3Solver {
                 if let Some(&lit) = self.expr_to_lit.get(inner) {
                     clause.push(lit);
                 }
+            } else if let Expr::Eq(atom, value) = expr {
+                // EUF sees a Boolean atom as `atom = true/false` (see
+                // `euf_assignment_assertion`); map that back to the atom's literal.
+                if let (Some(&lit), Expr::Bool(b)) = (self.expr_to_lit.get(&**atom), &**value) {
+                    clause.push(if *b { -lit } else { lit });
+                }
             }
         }
-        if !clause.is_empty() {
-            let _ = self.sat_solver.add_clause(clause);
+        // A conflict that maps to no literal cannot refute the current assignment.
+        // Report that, so the caller blocks the assignment instead of looping on it.
+        if clause.is_empty() || clause.len() < conflict.len() {
+            return false;
         }
+        let _ = self.sat_solver.add_clause(clause);
+        true
     }
 }

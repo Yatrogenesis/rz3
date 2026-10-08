@@ -233,6 +233,15 @@ pub struct LraSolver {
     /// Origins of a same-linear-form bound conflict detected before the Simplex runs
     /// (see `detect_row_bound_conflict`). Non-empty ⇒ genuine UNSAT with these origins.
     bound_conflict: Vec<Expr>,
+    /// A term this solver cannot interpret (uninterpreted application, division by a
+    /// non-constant, ...) was abstracted to a fresh variable. That is sound for Unsat
+    /// but NOT for Sat: the caller must not report Sat while this is set.
+    abstracted: bool,
+    /// Names of `Int`-sorted variables seen in constraints (integrality is enforced by
+    /// the caller through branch-and-bound lemmas).
+    int_vars: std::collections::BTreeSet<String>,
+    /// Internal ids of the `Int` variables above.
+    int_var_ids: std::collections::BTreeSet<usize>,
 }
 
 impl Default for LraSolver {
@@ -259,6 +268,9 @@ impl LraSolver {
             disequality_freeze_origins: Vec::new(),
             is_unknown: false,
             bound_conflict: Vec::new(),
+            abstracted: false,
+            int_vars: std::collections::BTreeSet::new(),
+            int_var_ids: std::collections::BTreeSet::new(),
         }
     }
 
@@ -278,6 +290,32 @@ impl LraSolver {
         self.disequality_freeze_origins.clear();
         self.is_unknown = false;
         self.bound_conflict.clear();
+        self.abstracted = false;
+        self.int_vars.clear();
+        self.int_var_ids.clear();
+    }
+
+    /// Every constraint currently asserted (bounds and disequalities), deduplicated.
+    fn all_origins(&self) -> Vec<Expr> {
+        let mut out: Vec<Expr> = self.bound_origins.values().cloned().collect();
+        out.extend(self.disequalities.iter().map(|(_, _, o)| o.clone()));
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// See the `abstracted` field: when true, a satisfiable verdict is not trustworthy.
+    pub fn is_abstracted(&self) -> bool {
+        self.abstracted
+    }
+
+    /// `Int`-sorted variables whose current model value is not an integer, with that
+    /// value. Empty when the model is integral.
+    pub fn non_integral_int_vars(&self) -> Vec<(String, BigRational)> {
+        self.get_all_assignments()
+            .into_iter()
+            .filter(|(name, v)| self.int_vars.contains(name) && !v.is_integer())
+            .collect()
     }
 
     pub fn is_unknown(&self) -> bool {
@@ -354,7 +392,7 @@ impl LraSolver {
             }
         }
 
-        for (_basic, other_row) in self.tableau.iter_mut() {
+        for other_row in self.tableau.values_mut() {
             if let Some(a_ik) = other_row.remove(&x_j) {
                 for (&col, val) in new_row.iter() {
                     let entry = other_row.entry(col).or_insert(rat(0, 1));
@@ -603,17 +641,30 @@ impl LraSolver {
         }
         let entry = cur;
         let mut origins = Vec::new();
+        let mut total = DeltaRational::zero();
+        let mut closed = false;
         let mut guard = 0;
         loop {
             let (p, idx) = pred[&cur];
             origins.push(edges[idx].3.clone());
+            total = total.add(&edges[idx].2);
             cur = p;
             guard += 1;
-            if cur == entry || guard > n {
+            if cur == entry {
+                closed = true;
+                break;
+            }
+            if guard > n {
                 break;
             }
         }
-        self.bound_conflict = origins;
+        // The explanation is only trusted when the walk really closed a cycle of negative
+        // total weight; otherwise blame everything (sound, less sharp).
+        if closed && total.lt_delta(&DeltaRational::zero()) {
+            self.bound_conflict = origins;
+        } else {
+            self.bound_conflict = self.all_origins();
+        }
         true
     }
 
@@ -1039,12 +1090,14 @@ impl TheorySolver for LraSolver {
             // contradictory bound origins are exactly the unsat core.
             return self.bound_conflict.clone();
         }
-        if let Some(origin) = &self.disequality_conflict {
-            // Origen de la desigualdad + las cotas que congelan sus variables,
-            // para que el SAT core aprenda una cláusula útil (no una trivial).
-            let mut out = vec![origin.clone()];
-            out.extend(self.disequality_freeze_origins.iter().cloned());
-            return out;
+        if self.disequality_conflict.is_some() {
+            // The freeze origins gathered by `collect_freeze_origins` only cover bounds on
+            // the disequality's own variables; the equalities that tie those variables to
+            // others (a = b, c - b = 2, ...) are not among them. A learned clause built
+            // from that partial set is stronger than the real conflict and can wrongly
+            // exclude satisfiable assignments. Blame every active constraint instead:
+            // sound, if less sharp.
+            return self.all_origins();
         }
 
         let mut conflict = Vec::new();
@@ -1061,12 +1114,18 @@ impl TheorySolver for LraSolver {
                 false
             };
 
+            let mut complete = true;
             if let Some(expr) = self.bound_origins.get(&(x_i, is_lower_violated)) {
                 conflict.push(expr.clone());
+            } else {
+                complete = false;
             }
 
             if let Some(row) = self.tableau.get(&x_i) {
                 for (&x_j, a_ij) in row.iter() {
+                    if *a_ij == rat(0, 1) {
+                        continue;
+                    }
                     let a_ij_gt_0 = a_ij > &rat(0, 1);
                     let needed_lower = if is_lower_violated {
                         !a_ij_gt_0
@@ -1075,8 +1134,15 @@ impl TheorySolver for LraSolver {
                     };
                     if let Some(expr) = self.bound_origins.get(&(x_j, needed_lower)) {
                         conflict.push(expr.clone());
+                    } else {
+                        // A blocking bound with no recorded origin: the Farkas set is
+                        // incomplete, so do not present it as the conflict.
+                        complete = false;
                     }
                 }
+            }
+            if !complete {
+                return self.all_origins();
             }
         }
         conflict
@@ -1099,93 +1165,102 @@ impl TheorySolver for LraSolver {
 impl LraSolver {
     fn assert_internal(&mut self, rel_expr: &Expr, origin_expr: &Expr) {
         match rel_expr {
-            Expr::Le(lhs, rhs) => {
-                let mut coeffs = BTreeMap::new();
-                let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
-                let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
-                let slack = self.create_slack_var();
-                self.tableau.insert(slack, coeffs);
-                self.basic_vars.push(slack);
-                self.upper_bounds.insert(
-                    slack,
-                    Bound {
-                        val: -(c1 + c2),
-                        is_strict: false,
-                    },
-                );
-                self.bound_origins
-                    .insert((slack, false), origin_expr.clone());
+            Expr::Le(lhs, rhs) => self.assert_bound(lhs, rhs, Some(true), false, origin_expr),
+            Expr::Lt(lhs, rhs) => self.assert_bound(lhs, rhs, Some(true), true, origin_expr),
+            Expr::Ge(lhs, rhs) => self.assert_bound(lhs, rhs, Some(false), false, origin_expr),
+            Expr::Gt(lhs, rhs) => self.assert_bound(lhs, rhs, Some(false), true, origin_expr),
+            Expr::Eq(lhs, rhs) => self.assert_bound(lhs, rhs, None, false, origin_expr),
+            _ => {}
+        }
+    }
+
+    /// Record `lhs - rhs  (<=|<|>=|>|=)  0` as a bound on a fresh slack row.
+    /// `upper`: `Some(true)` upper bound, `Some(false)` lower bound, `None` equality.
+    ///
+    /// When every variable of the row is an `Int` the row is scaled to coprime integer
+    /// coefficients and the bound is rounded (`x < 3` becomes `x <= 2`, `2x >= 1`
+    /// becomes `x >= 1`). That is equivalent over the integers, removes strictness and
+    /// makes unbounded integer problems such as `0 < a-c < 1` conflict immediately
+    /// instead of being left to an endless branch-and-bound.
+    fn assert_bound(
+        &mut self,
+        lhs: &Expr,
+        rhs: &Expr,
+        upper: Option<bool>,
+        mut strict: bool,
+        origin_expr: &Expr,
+    ) {
+        let mut coeffs = BTreeMap::new();
+        let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
+        let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
+        let mut bound = -(c1 + c2);
+        let mut eq_bounds: Option<(Rational, Rational)> = None;
+        if !coeffs.is_empty() && coeffs.keys().all(|id| self.int_var_ids.contains(id)) {
+            if let Some(factor) = Self::integer_scale(&coeffs) {
+                for c in coeffs.values_mut() {
+                    *c = c.clone() * factor.clone();
+                }
+                bound *= factor;
+                match upper {
+                    Some(true) => {
+                        bound = if strict && bound.is_integer() {
+                            bound - rat(1, 1)
+                        } else {
+                            bound.floor()
+                        };
+                        strict = false;
+                    }
+                    Some(false) => {
+                        bound = if strict && bound.is_integer() {
+                            bound + rat(1, 1)
+                        } else {
+                            bound.ceil()
+                        };
+                        strict = false;
+                    }
+                    None => eq_bounds = Some((bound.ceil(), bound.floor())),
+                }
             }
-            Expr::Lt(lhs, rhs) => {
-                let mut coeffs = BTreeMap::new();
-                let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
-                let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
-                let slack = self.create_slack_var();
-                self.tableau.insert(slack, coeffs);
-                self.basic_vars.push(slack);
-                self.upper_bounds.insert(
-                    slack,
-                    Bound {
-                        val: -(c1 + c2),
-                        is_strict: true,
-                    },
-                );
-                self.bound_origins
-                    .insert((slack, false), origin_expr.clone());
-            }
-            Expr::Ge(lhs, rhs) => {
-                let mut coeffs = BTreeMap::new();
-                let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
-                let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
-                let slack = self.create_slack_var();
-                self.tableau.insert(slack, coeffs);
-                self.basic_vars.push(slack);
-                self.lower_bounds.insert(
-                    slack,
-                    Bound {
-                        val: -(c1 + c2),
-                        is_strict: false,
-                    },
-                );
-                self.bound_origins
-                    .insert((slack, true), origin_expr.clone());
-            }
-            Expr::Gt(lhs, rhs) => {
-                let mut coeffs = BTreeMap::new();
-                let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
-                let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
-                let slack = self.create_slack_var();
-                self.tableau.insert(slack, coeffs);
-                self.basic_vars.push(slack);
-                self.lower_bounds.insert(
-                    slack,
-                    Bound {
-                        val: -(c1 + c2),
-                        is_strict: true,
-                    },
-                );
-                self.bound_origins
-                    .insert((slack, true), origin_expr.clone());
-            }
-            Expr::Eq(lhs, rhs) => {
-                let mut coeffs = BTreeMap::new();
-                let c1 = self.extract_coeffs(lhs, rat(1, 1), &mut coeffs);
-                let c2 = self.extract_coeffs(rhs, rat(-1, 1), &mut coeffs);
-                let bound = -(c1 + c2);
-                let slack = self.create_slack_var();
-                self.tableau.insert(slack, coeffs);
-                self.basic_vars.push(slack);
-                self.lower_bounds.insert(
-                    slack,
-                    Bound {
-                        val: bound.clone(),
-                        is_strict: false,
-                    },
-                );
+        }
+        let slack = self.create_slack_var();
+        self.tableau.insert(slack, coeffs);
+        self.basic_vars.push(slack);
+        match upper {
+            Some(true) => {
                 self.upper_bounds.insert(
                     slack,
                     Bound {
                         val: bound,
+                        is_strict: strict,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, false), origin_expr.clone());
+            }
+            Some(false) => {
+                self.lower_bounds.insert(
+                    slack,
+                    Bound {
+                        val: bound,
+                        is_strict: strict,
+                    },
+                );
+                self.bound_origins
+                    .insert((slack, true), origin_expr.clone());
+            }
+            None => {
+                let (low, high) = eq_bounds.unwrap_or((bound.clone(), bound));
+                self.lower_bounds.insert(
+                    slack,
+                    Bound {
+                        val: low,
+                        is_strict: false,
+                    },
+                );
+                self.upper_bounds.insert(
+                    slack,
+                    Bound {
+                        val: high,
                         is_strict: false,
                     },
                 );
@@ -1194,7 +1269,35 @@ impl LraSolver {
                 self.bound_origins
                     .insert((slack, false), origin_expr.clone());
             }
-            _ => {}
+        }
+    }
+
+    /// Positive factor that turns the coefficients into coprime integers.
+    fn integer_scale(coeffs: &BTreeMap<usize, Rational>) -> Option<Rational> {
+        use num_traits::{Signed, Zero};
+        fn gcd(a: BigInt, b: BigInt) -> BigInt {
+            let (mut a, mut b) = (a.abs(), b.abs());
+            while !b.is_zero() {
+                let t = &a % &b;
+                a = b;
+                b = t;
+            }
+            a
+        }
+        let mut lcm = BigInt::from(1);
+        for c in coeffs.values() {
+            let d = c.denom().clone();
+            lcm = &lcm / gcd(lcm.clone(), d.clone()) * d;
+        }
+        let mut g = BigInt::from(0);
+        for c in coeffs.values() {
+            let n = (c.numer().clone() * &lcm) / c.denom().clone();
+            g = gcd(g, n);
+        }
+        if g.is_zero() {
+            None
+        } else {
+            Some(Rational::new(lcm, g))
         }
     }
 
@@ -1207,8 +1310,12 @@ impl LraSolver {
         match expr {
             Expr::Int(i) => scale * int_rat(*i),
             Expr::Real(i, s) => scale * decimal_rat(*i, *s),
-            Expr::Var(name, _) => {
+            Expr::Var(name, ty) => {
                 let id = self.get_or_create_var(name);
+                if *ty == Type::Int {
+                    self.int_vars.insert(name.clone());
+                    self.int_var_ids.insert(id);
+                }
                 *coeffs.entry(id).or_insert(rat(0, 1)) += scale;
                 rat(0, 1)
             }
@@ -1223,6 +1330,10 @@ impl LraSolver {
                 if args.is_empty() {
                     return rat(0, 1);
                 }
+                if args.len() == 1 {
+                    // Unary minus.
+                    return self.extract_coeffs(&args[0], -scale, coeffs);
+                }
                 let mut constant = self.extract_coeffs(&args[0], scale.clone(), coeffs);
                 for arg in &args[1..] {
                     // Subtrahend must be extracted with NEGATED scale so its *variables*
@@ -1234,19 +1345,36 @@ impl LraSolver {
                 constant
             }
             Expr::Mul(args) => {
-                if args.len() == 2 {
-                    if let Some(c) = self.try_eval_const(&args[0]) {
-                        return self.extract_coeffs(&args[1], scale * c, coeffs);
-                    } else if let Some(c) = self.try_eval_const(&args[1]) {
-                        return self.extract_coeffs(&args[0], scale * c, coeffs);
+                let mut factor = rat(1, 1);
+                let mut non_const: Vec<&Expr> = Vec::new();
+                for a in args {
+                    match self.try_eval_const(a) {
+                        Some(c) => factor *= c,
+                        None => non_const.push(a),
                     }
                 }
-                // Fallthrough to treat as uninterpreted variable
+                match non_const.as_slice() {
+                    [] => return scale * factor,
+                    [only] => return self.extract_coeffs(only, scale * factor, coeffs),
+                    _ => {}
+                }
+                // Nonlinear product: abstracted to a fresh variable here; the NLA theory
+                // declines (Unknown) whenever such a term survives unrefuted.
                 let id = self.get_or_create_var(&format!("{}", expr));
                 *coeffs.entry(id).or_insert(rat(0, 1)) += scale;
                 rat(0, 1)
             }
+            Expr::Div(a, b) => match self.try_eval_const(b) {
+                Some(c) if c != rat(0, 1) => self.extract_coeffs(a, scale / c, coeffs),
+                _ => {
+                    self.abstracted = true;
+                    let id = self.get_or_create_var(&format!("{}", expr));
+                    *coeffs.entry(id).or_insert(rat(0, 1)) += scale;
+                    rat(0, 1)
+                }
+            },
             _ => {
+                self.abstracted = true;
                 let id = self.get_or_create_var(&format!("{}", expr));
                 *coeffs.entry(id).or_insert(rat(0, 1)) += scale;
                 rat(0, 1)
@@ -1258,6 +1386,29 @@ impl LraSolver {
         match expr {
             Expr::Int(i) => Some(int_rat(*i)),
             Expr::Real(i, s) => Some(decimal_rat(*i, *s)),
+            Expr::Add(args) => args
+                .iter()
+                .try_fold(rat(0, 1), |acc, a| Some(acc + self.try_eval_const(a)?)),
+            Expr::Mul(args) => args
+                .iter()
+                .try_fold(rat(1, 1), |acc, a| Some(acc * self.try_eval_const(a)?)),
+            Expr::Sub(args) => match args.as_slice() {
+                [] => Some(rat(0, 1)),
+                [only] => Some(-self.try_eval_const(only)?),
+                [first, rest @ ..] => {
+                    rest.iter().try_fold(self.try_eval_const(first)?, |acc, a| {
+                        Some(acc - self.try_eval_const(a)?)
+                    })
+                }
+            },
+            Expr::Div(a, b) => {
+                let d = self.try_eval_const(b)?;
+                if d == rat(0, 1) {
+                    None
+                } else {
+                    Some(self.try_eval_const(a)? / d)
+                }
+            }
             _ => None,
         }
     }

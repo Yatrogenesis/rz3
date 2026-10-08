@@ -160,7 +160,16 @@ impl CdclSolver {
         }
     }
 
-    pub fn add_clause(&mut self, mut lits: Vec<Literal>) -> Option<ClauseIdx> {
+    /// Add a problem clause. The solver is first unwound to decision level 0: after a
+    /// successful `solve()` it still holds a full assignment at deeper levels, and adding
+    /// a clause (or a unit) on top of that left watches on already-false literals and
+    /// let units contradict stale assignments, which produced spurious unsat/sat.
+    pub fn add_clause(&mut self, lits: Vec<Literal>) -> Option<ClauseIdx> {
+        self.backtrack(0);
+        self.add_clause_inner(lits)
+    }
+
+    fn add_clause_inner(&mut self, mut lits: Vec<Literal>) -> Option<ClauseIdx> {
         if !self.ok {
             return None;
         }
@@ -313,6 +322,7 @@ impl CdclSolver {
             return false;
         }
         let mut conflict_count = 0;
+        self.backtrack(0);
 
         if self.unit_propagate().is_err() {
             self.ok = false;
@@ -331,7 +341,8 @@ impl CdclSolver {
                 let (learnt_lits, backtrack_level) = self.analyze_conflict(conflict_idx);
                 self.decay_scores();
                 self.backtrack(backtrack_level);
-                if let Some(learnt_idx) = self.add_clause(learnt_lits) {
+                let learnt_lits = self.order_learnt(learnt_lits);
+                if let Some(learnt_idx) = self.add_learnt(learnt_lits) {
                     if let Some(unit_lit) = self.check_unit_clause(learnt_idx) {
                         self.assign(unit_lit, self.current_level, Some(learnt_idx));
                     }
@@ -447,11 +458,73 @@ impl CdclSolver {
                 self.assignments[var] = Assignment::Unassigned;
                 self.reasons[var] = None;
                 self.levels[var] = 0;
+                // `pick_branching_variable` discards assigned variables from the heap;
+                // an unassigned one must be selectable again or `solve` would stop with
+                // free variables and report a satisfying assignment that is not one.
+                self.activity_heap.push(Activity {
+                    score: self.scores[var],
+                    var,
+                });
             }
             self.trail.truncate(start);
             self.current_level -= 1;
         }
-        self.qhead = self.trail.len();
+        // Literals still on the trail below the target level were fully propagated, but
+        // units appended at level 0 since the last propagation may not have been.
+        self.qhead = self.qhead.min(self.trail.len());
+    }
+
+    /// Put the asserting literal (the one added last by `analyze_conflict`) first and the
+    /// literal with the highest remaining level second, as the watch scheme requires.
+    fn order_learnt(&self, mut lits: Vec<Literal>) -> Vec<Literal> {
+        lits.dedup();
+        if lits.len() >= 2 {
+            let last = lits.len() - 1;
+            lits.swap(0, last);
+            let mut best = 1;
+            for i in 2..lits.len() {
+                if self.levels[lits[i].unsigned_abs() as usize]
+                    > self.levels[lits[best].unsigned_abs() as usize]
+                {
+                    best = i;
+                }
+            }
+            lits.swap(1, best);
+        }
+        lits
+    }
+
+    /// Add a clause learnt during search (current level > 0 is expected).
+    fn add_learnt(&mut self, lits: Vec<Literal>) -> Option<ClauseIdx> {
+        if !self.ok {
+            return None;
+        }
+        if lits.is_empty() {
+            self.ok = false;
+            return None;
+        }
+        for &lit in &lits {
+            self.ensure_var(lit.unsigned_abs() as usize);
+        }
+        if lits.len() == 1 {
+            self.assign(lits[0], 0, None);
+            return None;
+        }
+        let lbd = self.calculate_lbd(&lits);
+        let clause_idx = self.clauses.push(&lits, true, lbd);
+        let lit0 = self.clauses.get_lit(clause_idx, 0);
+        let lit1 = self.clauses.get_lit(clause_idx, 1);
+        let idx0 = self.lit_to_idx(-lit0);
+        let idx1 = self.lit_to_idx(-lit1);
+        self.watches[idx0].push(Watch {
+            blocker: lit1,
+            idx: clause_idx,
+        });
+        self.watches[idx1].push(Watch {
+            blocker: lit0,
+            idx: clause_idx,
+        });
+        Some(clause_idx)
     }
 
     fn analyze_conflict(&mut self, conflict_idx: ClauseIdx) -> (Vec<Literal>, usize) {

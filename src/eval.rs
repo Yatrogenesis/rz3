@@ -1,0 +1,257 @@
+//! Exact evaluation of ground formulas under a model.
+//!
+//! Used as an independent check on satisfiable verdicts: before `check()` reports
+//! `Sat`, every assertion the theories were given is evaluated with the model the
+//! solver extracted. A formula that evaluates to false means some component (SAT core,
+//! simplex, bit-blaster, model extraction) is wrong, and the verdict is downgraded to
+//! `Unknown` instead of being reported.
+
+use crate::ast::{Expr, ModelValue, Type};
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::{One, Zero};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Bool(bool),
+    Num(BigRational),
+    Bv(u64, usize),
+}
+
+fn mask(width: usize) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
+}
+
+fn signed(v: u64, width: usize) -> i128 {
+    if width > 0 && width <= 64 && (v >> (width - 1)) & 1 == 1 {
+        i128::from(v) - (1i128 << width)
+    } else {
+        i128::from(v)
+    }
+}
+
+fn decimal(mantissa: i64, scale: u32) -> BigRational {
+    BigRational::new(BigInt::from(mantissa), BigInt::from(10).pow(scale))
+}
+
+fn default_value(ty: &Type) -> Option<Value> {
+    match ty {
+        Type::Bool => Some(Value::Bool(false)),
+        Type::Int | Type::Real => Some(Value::Num(BigRational::zero())),
+        Type::BitVec(w) => Some(Value::Bv(0, *w)),
+        _ => None,
+    }
+}
+
+fn bool_of(v: Option<Value>) -> Option<bool> {
+    match v {
+        Some(Value::Bool(b)) => Some(b),
+        _ => None,
+    }
+}
+
+/// Evaluate `expr`; `None` when it contains something this evaluator does not interpret
+/// (uninterpreted applications, arrays, strings, floating point, quantifiers, ...).
+pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> {
+    match expr {
+        Expr::Bool(b) => Some(Value::Bool(*b)),
+        Expr::Int(i) => Some(Value::Num(BigRational::from_integer(BigInt::from(*i)))),
+        Expr::Real(m, s) => Some(Value::Num(decimal(*m, *s))),
+        Expr::BvConst(v, w) => Some(Value::Bv(*v & mask(*w), *w)),
+        Expr::Var(name, ty) => match model.get(name) {
+            Some(ModelValue::Bool(b)) => Some(Value::Bool(*b)),
+            Some(ModelValue::Int(i)) => Some(Value::Num(BigRational::from_integer(i.clone()))),
+            Some(ModelValue::Real(r)) => Some(Value::Num(r.clone())),
+            Some(ModelValue::BitVec(v, w)) => match ty {
+                // The model's width is the highest bit seen; trust the declared sort.
+                Type::BitVec(declared) => Some(Value::Bv(*v & mask(*declared), *declared)),
+                _ => Some(Value::Bv(*v, *w)),
+            },
+            Some(ModelValue::Float(_)) => None,
+            None => default_value(ty),
+        },
+        Expr::Not(a) => Some(Value::Bool(!bool_of(eval(a, model))?)),
+        Expr::And(args) => {
+            let mut all = true;
+            for a in args {
+                all &= bool_of(eval(a, model))?;
+            }
+            Some(Value::Bool(all))
+        }
+        Expr::Or(args) => {
+            let mut any = false;
+            for a in args {
+                any |= bool_of(eval(a, model))?;
+            }
+            Some(Value::Bool(any))
+        }
+        Expr::Implies(a, b) => {
+            let (x, y) = (bool_of(eval(a, model))?, bool_of(eval(b, model))?);
+            Some(Value::Bool(!x || y))
+        }
+        Expr::Ite(c, t, e) => {
+            if bool_of(eval(c, model))? {
+                eval(t, model)
+            } else {
+                eval(e, model)
+            }
+        }
+        Expr::Eq(a, b) => Some(Value::Bool(eval(a, model)? == eval(b, model)?)),
+        Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b) => {
+            let (Value::Num(x), Value::Num(y)) = (eval(a, model)?, eval(b, model)?) else {
+                return None;
+            };
+            Some(Value::Bool(match expr {
+                Expr::Lt(_, _) => x < y,
+                Expr::Le(_, _) => x <= y,
+                Expr::Gt(_, _) => x > y,
+                _ => x >= y,
+            }))
+        }
+        Expr::Add(args) => {
+            let mut sum = BigRational::zero();
+            for a in args {
+                let Value::Num(v) = eval(a, model)? else {
+                    return None;
+                };
+                sum += v;
+            }
+            Some(Value::Num(sum))
+        }
+        Expr::Mul(args) => {
+            let mut prod = BigRational::one();
+            for a in args {
+                let Value::Num(v) = eval(a, model)? else {
+                    return None;
+                };
+                prod *= v;
+            }
+            Some(Value::Num(prod))
+        }
+        Expr::Sub(args) => {
+            let (first, rest) = args.split_first()?;
+            let Value::Num(mut acc) = eval(first, model)? else {
+                return None;
+            };
+            if rest.is_empty() {
+                return Some(Value::Num(-acc));
+            }
+            for a in rest {
+                let Value::Num(v) = eval(a, model)? else {
+                    return None;
+                };
+                acc -= v;
+            }
+            Some(Value::Num(acc))
+        }
+        Expr::Div(a, b) => {
+            let (Value::Num(x), Value::Num(y)) = (eval(a, model)?, eval(b, model)?) else {
+                return None;
+            };
+            if y.is_zero() {
+                None
+            } else {
+                Some(Value::Num(x / y))
+            }
+        }
+        Expr::BvNot(a) => {
+            let Value::Bv(v, w) = eval(a, model)? else {
+                return None;
+            };
+            Some(Value::Bv(!v & mask(w), w))
+        }
+        Expr::BvExtract(h, l, a) => {
+            let Value::Bv(v, w) = eval(a, model)? else {
+                return None;
+            };
+            if l > h || *h >= w {
+                return None;
+            }
+            let width = h - l + 1;
+            Some(Value::Bv((v >> l) & mask(width), width))
+        }
+        Expr::BvConcat(a, b) => {
+            let (Value::Bv(hi, wh), Value::Bv(lo, wl)) = (eval(a, model)?, eval(b, model)?) else {
+                return None;
+            };
+            if wh + wl > 64 {
+                return None;
+            }
+            Some(Value::Bv((hi << wl) | lo, wh + wl))
+        }
+        Expr::BvAdd(a, b)
+        | Expr::BvSub(a, b)
+        | Expr::BvMul(a, b)
+        | Expr::BvAnd(a, b)
+        | Expr::BvOr(a, b)
+        | Expr::BvXor(a, b)
+        | Expr::BvShl(a, b)
+        | Expr::BvLshr(a, b)
+        | Expr::BvAshr(a, b)
+        | Expr::BvUle(a, b)
+        | Expr::BvUlt(a, b)
+        | Expr::BvSle(a, b)
+        | Expr::BvSlt(a, b) => {
+            let (Value::Bv(x, w), Value::Bv(y, wy)) = (eval(a, model)?, eval(b, model)?) else {
+                return None;
+            };
+            if w != wy {
+                return None;
+            }
+            let m = mask(w);
+            let shift = |left: bool, arithmetic: bool| -> u64 {
+                if y >= w as u64 {
+                    if arithmetic && (x >> (w - 1)) & 1 == 1 {
+                        m
+                    } else {
+                        0
+                    }
+                } else if left {
+                    (x << y) & m
+                } else if arithmetic {
+                    ((signed(x, w) >> y) as u64) & m
+                } else {
+                    x >> y
+                }
+            };
+            Some(match expr {
+                Expr::BvAdd(_, _) => Value::Bv(x.wrapping_add(y) & m, w),
+                Expr::BvSub(_, _) => Value::Bv(x.wrapping_sub(y) & m, w),
+                Expr::BvMul(_, _) => Value::Bv(x.wrapping_mul(y) & m, w),
+                Expr::BvAnd(_, _) => Value::Bv(x & y, w),
+                Expr::BvOr(_, _) => Value::Bv(x | y, w),
+                Expr::BvXor(_, _) => Value::Bv(x ^ y, w),
+                Expr::BvShl(_, _) => Value::Bv(shift(true, false), w),
+                Expr::BvLshr(_, _) => Value::Bv(shift(false, false), w),
+                Expr::BvAshr(_, _) => Value::Bv(shift(false, true), w),
+                Expr::BvUle(_, _) => Value::Bool(x <= y),
+                Expr::BvUlt(_, _) => Value::Bool(x < y),
+                Expr::BvSle(_, _) => Value::Bool(signed(x, w) <= signed(y, w)),
+                _ => Value::Bool(signed(x, w) < signed(y, w)),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Outcome of checking one assertion against a model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Verdict {
+    True,
+    False,
+    /// Contains something the evaluator does not interpret.
+    Unknown,
+}
+
+pub fn holds(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Verdict {
+    match eval(expr, model) {
+        Some(Value::Bool(true)) => Verdict::True,
+        Some(Value::Bool(false)) => Verdict::False,
+        _ => Verdict::Unknown,
+    }
+}

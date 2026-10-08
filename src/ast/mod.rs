@@ -88,6 +88,91 @@ impl Expr {
         }
     }
 
+    /// True if `pred` holds for this node or any descendant.
+    pub fn any_subterm(&self, pred: &dyn Fn(&Expr) -> bool) -> bool {
+        if pred(self) {
+            return true;
+        }
+        let mut found = false;
+        self.map_children(&mut |c| {
+            if !found && c.any_subterm(pred) {
+                found = true;
+            }
+            c.clone()
+        });
+        found
+    }
+
+    /// Product of two or more non-constant factors, or division by a non-constant.
+    pub fn has_nonlinear_arith(&self) -> bool {
+        fn is_const(e: &Expr) -> bool {
+            match e {
+                Expr::Int(_) | Expr::Real(_, _) => true,
+                Expr::Add(v) | Expr::Mul(v) | Expr::Sub(v) => v.iter().all(is_const),
+                Expr::Div(a, b) => is_const(a) && is_const(b),
+                _ => false,
+            }
+        }
+        self.any_subterm(&|e| match e {
+            Expr::Mul(args) => args.iter().filter(|a| !is_const(a)).count() >= 2,
+            Expr::Div(_, d) => !is_const(d),
+            _ => false,
+        })
+    }
+
+    /// Rebuild this node with `f` applied to every direct child expression.
+    /// Leaves (constants, variables) are returned unchanged. Binders keep their
+    /// variable lists; only the body is mapped.
+    pub fn map_children(&self, f: &mut dyn FnMut(&Expr) -> Expr) -> Expr {
+        let b = |x: &Expr, f: &mut dyn FnMut(&Expr) -> Expr| Box::new(f(x));
+        match self {
+            Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Real(_, _)
+            | Expr::Var(_, _)
+            | Expr::BvConst(_, _)
+            | Expr::StrConst(_) => self.clone(),
+            Expr::And(v) => Expr::And(v.iter().map(&mut *f).collect()),
+            Expr::Or(v) => Expr::Or(v.iter().map(&mut *f).collect()),
+            Expr::Add(v) => Expr::Add(v.iter().map(&mut *f).collect()),
+            Expr::Sub(v) => Expr::Sub(v.iter().map(&mut *f).collect()),
+            Expr::Mul(v) => Expr::Mul(v.iter().map(&mut *f).collect()),
+            Expr::StrConcat(v) => Expr::StrConcat(v.iter().map(&mut *f).collect()),
+            Expr::App(n, v) => Expr::App(n.clone(), v.iter().map(&mut *f).collect()),
+            Expr::Not(a) => Expr::Not(b(a, f)),
+            Expr::BvNot(a) => Expr::BvNot(b(a, f)),
+            Expr::StrLen(a) => Expr::StrLen(b(a, f)),
+            Expr::BvExtract(h, l, a) => Expr::BvExtract(*h, *l, b(a, f)),
+            Expr::Implies(x, y) => Expr::Implies(b(x, f), b(y, f)),
+            Expr::Eq(x, y) => Expr::Eq(b(x, f), b(y, f)),
+            Expr::Lt(x, y) => Expr::Lt(b(x, f), b(y, f)),
+            Expr::Le(x, y) => Expr::Le(b(x, f), b(y, f)),
+            Expr::Gt(x, y) => Expr::Gt(b(x, f), b(y, f)),
+            Expr::Ge(x, y) => Expr::Ge(b(x, f), b(y, f)),
+            Expr::Div(x, y) => Expr::Div(b(x, f), b(y, f)),
+            Expr::BvAdd(x, y) => Expr::BvAdd(b(x, f), b(y, f)),
+            Expr::BvSub(x, y) => Expr::BvSub(b(x, f), b(y, f)),
+            Expr::BvMul(x, y) => Expr::BvMul(b(x, f), b(y, f)),
+            Expr::BvAnd(x, y) => Expr::BvAnd(b(x, f), b(y, f)),
+            Expr::BvOr(x, y) => Expr::BvOr(b(x, f), b(y, f)),
+            Expr::BvXor(x, y) => Expr::BvXor(b(x, f), b(y, f)),
+            Expr::BvShl(x, y) => Expr::BvShl(b(x, f), b(y, f)),
+            Expr::BvLshr(x, y) => Expr::BvLshr(b(x, f), b(y, f)),
+            Expr::BvAshr(x, y) => Expr::BvAshr(b(x, f), b(y, f)),
+            Expr::BvUle(x, y) => Expr::BvUle(b(x, f), b(y, f)),
+            Expr::BvUlt(x, y) => Expr::BvUlt(b(x, f), b(y, f)),
+            Expr::BvSle(x, y) => Expr::BvSle(b(x, f), b(y, f)),
+            Expr::BvSlt(x, y) => Expr::BvSlt(b(x, f), b(y, f)),
+            Expr::BvConcat(x, y) => Expr::BvConcat(b(x, f), b(y, f)),
+            Expr::Select(x, y) => Expr::Select(b(x, f), b(y, f)),
+            Expr::StrContains(x, y) => Expr::StrContains(b(x, f), b(y, f)),
+            Expr::Ite(c, t, e) => Expr::Ite(b(c, f), b(t, f), b(e, f)),
+            Expr::Store(x, y, z) => Expr::Store(b(x, f), b(y, f), b(z, f)),
+            Expr::ForAll(vs, body) => Expr::ForAll(vs.clone(), b(body, f)),
+            Expr::Exists(vs, body) => Expr::Exists(vs.clone(), b(body, f)),
+        }
+    }
+
     pub fn substitute(&self, vars: &BTreeMap<String, Expr>) -> Expr {
         match self {
             Expr::Var(name, _) => {

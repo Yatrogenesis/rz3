@@ -22,7 +22,7 @@ fn main() {
             return;
         }
     };
-    let mut parser = Parser::new(&input);
+    let mut parser = Parser::strict(&input);
     let mut solver = Rz3Solver::new();
 
     let mut printed_check_sat = false;
@@ -33,10 +33,9 @@ fn main() {
             Command::DeclareFun(name, params, return_type) => {
                 solver.declare_fun_signature(name, params, return_type);
             }
-            Command::DefineFun(name, params, return_type, _) => {
-                let param_types = params.into_iter().map(|(_, ty)| ty).collect();
-                solver.declare_fun_signature(name, param_types, return_type);
-            }
+            // The parser expands `define-fun` bodies at every use site; declaring the
+            // name here as an uninterpreted function would silently drop the body.
+            Command::DefineFun(_, _, _, _) | Command::Skipped(_) => {}
             Command::Assert(expr) => solver.assert(&expr),
             Command::Push(n) => {
                 for _ in 0..n {
@@ -66,6 +65,13 @@ fn main() {
             }
             Command::Exit => break,
         }
+    }
+
+    if let Some(err) = parser.error() {
+        // Fail closed: a parse failure must never be followed by a verdict computed
+        // from a truncated or weakened formula.
+        println!("(error \"{}\")", err.replace('"', "\"\""));
+        std::process::exit(1);
     }
 
     if !printed_check_sat {

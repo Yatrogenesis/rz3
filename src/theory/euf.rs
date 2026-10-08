@@ -27,6 +27,8 @@ pub struct EufSolver {
     original_exprs: Vec<Expr>,
     inconsistent: bool,
     conflict: Vec<Expr>,
+    /// Every equality asserted so far (the candidate reasons of a conflict).
+    eq_exprs: Vec<Expr>,
 }
 
 impl Default for EufSolver {
@@ -49,6 +51,7 @@ impl EufSolver {
             original_exprs: Vec::new(),
             inconsistent: false,
             conflict: Vec::new(),
+            eq_exprs: Vec::new(),
         }
     }
 
@@ -64,6 +67,7 @@ impl EufSolver {
         self.original_exprs.clear();
         self.inconsistent = false;
         self.conflict.clear();
+        self.eq_exprs.clear();
     }
 
     fn find(&mut self, i: usize) -> usize {
@@ -160,6 +164,72 @@ impl EufSolver {
         }
     }
 
+    /// `true != false` is an axiom of the Boolean sort, not an asserted atom.
+    fn builtin_disequality() -> Expr {
+        Expr::Not(Box::new(Expr::Eq(
+            Box::new(Expr::Bool(true)),
+            Box::new(Expr::Bool(false)),
+        )))
+    }
+
+    /// If either Boolean constant occurs, make sure `true != false` is enforced:
+    /// otherwise `p(a)`, `!p(b)`, `a = b` would merge `true` with `false` unnoticed.
+    fn ensure_bool_axiom(&mut self) {
+        let t = Expr::Bool(true);
+        let f = Expr::Bool(false);
+        if !(self.expr_to_id.contains_key(&t) || self.expr_to_id.contains_key(&f)) {
+            return;
+        }
+        let (it, iff) = (self.get_id(&t), self.get_id(&f));
+        let ax = Self::builtin_disequality();
+        if !self.disequalities.iter().any(|(_, _, e)| *e == ax) {
+            self.disequalities.push((it, iff, ax));
+        }
+    }
+
+    /// First asserted disequality whose two sides are now in one class.
+    fn violated_disequality(&mut self) -> Option<Expr> {
+        self.ensure_bool_axiom();
+        self.process_pending();
+        let diseqs = self.disequalities.clone();
+        for (d1, d2, expr) in diseqs {
+            if self.find(d1) == self.find(d2) {
+                return Some(expr);
+            }
+        }
+        None
+    }
+
+    /// Does `eqs` together with the disequality `diseq` already derive a contradiction?
+    fn core_conflicts(eqs: &[Expr], diseq: &Expr) -> bool {
+        let mut s = EufSolver::new();
+        for e in eqs {
+            s.assert_atom(e);
+        }
+        s.assert_atom(diseq);
+        s.violated_disequality().as_ref() == Some(diseq)
+            || (*diseq == Self::builtin_disequality() && s.violated_disequality().is_some())
+    }
+
+    fn assert_atom(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Eq(a, b) => {
+                let id_a = self.get_id(a);
+                let id_b = self.get_id(b);
+                self.eq_exprs.push(expr.clone());
+                self.merge(id_a, id_b, Some(expr.clone()));
+            }
+            Expr::Not(inner) => {
+                if let Expr::Eq(a, b) = &**inner {
+                    let id_a = self.get_id(a);
+                    let id_b = self.get_id(b);
+                    self.disequalities.push((id_a, id_b, expr.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn get_expr(&self, id: usize) -> &Expr {
         &self.original_exprs[id]
     }
@@ -191,37 +261,38 @@ impl TheorySolver for EufSolver {
         if self.inconsistent {
             return;
         }
-        match expr {
-            Expr::Eq(a, b) => {
-                let id_a = self.get_id(a);
-                let id_b = self.get_id(b);
-                self.merge(id_a, id_b, Some(expr.clone()));
-            }
-            Expr::Not(inner) => {
-                if let Expr::Eq(a, b) = &**inner {
-                    let id_a = self.get_id(a);
-                    let id_b = self.get_id(b);
-                    self.disequalities.push((id_a, id_b, expr.clone()));
-                }
-            }
-            _ => {}
-        }
+        self.assert_atom(expr);
     }
 
     fn check(&mut self) -> bool {
         if self.inconsistent {
             return false;
         }
-        self.process_pending();
-        let diseqs = self.disequalities.clone();
-        for (d1, d2, expr) in diseqs {
-            if self.find(d1) == self.find(d2) {
-                self.inconsistent = true;
-                self.conflict = vec![expr.clone()];
-                return false;
+        let Some(violated) = self.violated_disequality() else {
+            return true;
+        };
+        self.inconsistent = true;
+        // The violated disequality alone is not a conflict: it clashes only because of
+        // the equalities that merged its sides. Reduce all asserted equalities to a
+        // minimal set that still merges them (deletion-based), and report that set plus
+        // the disequality. The Boolean axiom `true != false` is valid, so it is not blamed.
+        let mut core = self.eq_exprs.clone();
+        core.dedup();
+        let mut i = 0;
+        while i < core.len() {
+            let mut trial = core.clone();
+            trial.remove(i);
+            if Self::core_conflicts(&trial, &violated) {
+                core = trial;
+            } else {
+                i += 1;
             }
         }
-        true
+        if violated != Self::builtin_disequality() {
+            core.push(violated);
+        }
+        self.conflict = core;
+        false
     }
 
     fn explain(&self) -> Vec<Expr> {

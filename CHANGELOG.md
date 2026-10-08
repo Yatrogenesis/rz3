@@ -3,6 +3,48 @@
 All notable changes to `rz3` are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project follows semantic versioning.
 
+## [Unreleased]
+
+Soundness fixes found by a 120-case differential pilot against Z3 5.1.0
+(`rz3` 0.1.4 answered `sat` on 56 of 60 `unsat` controls and could answer
+`unsat` on satisfiable inputs). Root causes were in the SMT-LIB front end and in
+conflict handling, not in the theory algorithms themselves. Behaviour change:
+inputs RZ3 cannot interpret now produce an error or `unknown`, never a verdict.
+
+### Fixed
+- **Front end:** operators it did not know (`-`, `distinct`, `=>`, `xor`, every
+  `bv*`, ...) were silently turned into uninterpreted applications, so `(- a b)`
+  became a free variable. They are now translated; anything unsupported is a
+  parse error. `#x..` literals were lexed as integers; numerals over 64 bits and
+  unknown commands used to end the script silently (and answer `sat` for the
+  prefix); `define-fun` bodies were discarded; `let`/`declare-const` were missing;
+  chainable `= <= < >= >` kept only the first two arguments.
+- **SAT core:** clauses were added on top of a stale assignment after `solve()`,
+  `backtrack` dropped pending units, unassigned variables were not returned to the
+  decision heap, and learnt clauses were sorted, breaking the watch invariant.
+  `new_var` in the bit-blaster re-enabled an already-inconsistent solver.
+- **Tactics:** `SolveEqs` lost equations (`x=1 /\ x=2`, cyclic definitions).
+- **Bit-vectors:** unsupported operators produced an empty vector (equality then
+  held trivially); `bvmul`, `bvor`, `bvxor`, `bvnot`, `bvsub`, shifts, extract,
+  concat and the four comparisons are now encoded; anything else makes the
+  verdict `unknown`.
+- **Arithmetic:** `ite` is lifted to propositional structure; division by a
+  constant and unary minus are exact; `Int` variables are enforced by bound
+  normalisation and branch-and-bound; real/decimal constants no longer disappear
+  from the nonlinear check; abstracted terms never support a `sat` verdict.
+- **Conflict explanations:** EUF and LRA reported partial cores, so learned
+  clauses could exclude satisfiable assignments (spurious `unsat`). Cores are now
+  minimal-by-deletion (EUF) or conservative (LRA).
+- **Uninterpreted functions:** applications are Ackermann-reduced, so congruence
+  holds over arithmetic and bit-vector arguments.
+
+### Added
+- `rz3::driver::check_script`, `rz3::eval` (exact model evaluation used to certify
+  every `sat`), `Parser::strict`/`Parser::error`, `Command::Skipped`.
+- `tests/frontend_soundness.rs`, `tests/sat_fuzz_vs_bruteforce.rs`,
+  `scripts/differential_fuzz.py` (random scripts, rz3 vs z3, zero tolerated
+  sat/unsat disagreements).
+
 ## [0.1.4] — 2026-07-30
 
 Soundness and hardening fixes for theory solvers that could previously return
