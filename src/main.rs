@@ -28,6 +28,9 @@ fn main() {
     let mut printed_check_sat = false;
     let mut last_result = None;
     while let Some(command) = parser.parse_command() {
+        if parser.error().is_some() {
+            break;
+        }
         match command {
             Command::SetLogic(_) | Command::SetOption(_, _) | Command::SetInfo(_, _) => {}
             Command::DeclareFun(name, params, return_type) => {

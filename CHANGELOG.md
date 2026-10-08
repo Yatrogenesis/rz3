@@ -38,6 +38,21 @@ inputs RZ3 cannot interpret now produce an error or `unknown`, never a verdict.
 - **Uninterpreted functions:** applications are Ackermann-reduced, so congruence
   holds over arithmetic and bit-vector arguments.
 
+- **Constant folding:** `i64` overflow in `+`, `*` and `-` wrapped around and made
+  `(> (+ 9223372036854775807 1) 0)` unsatisfiable; folding is now checked and an
+  overflowing term is left to the exact arithmetic theory.
+
+### Verification
+Release binary `cc4cbd34b76a6ea4` (this tree): pilot 840/840 correct, 0 non-repeatable;
+93 tests pass; `clippy -D warnings` and `fmt --check` clean; determinism n=30 gives one
+hash over a 500-script corpus; 6,500 random scripts (single and incremental
+`check-sat`/`push`/`pop`, bit-vectors of width 1..64) with 0 sat/unsat disagreements
+against Z3 5.1.0. Earlier snapshots of the same code (before the overflow fix and the
+second certification layer) were fuzzed with 22,000 further scripts and also showed 0.
+Known limits: 9 of the 6,500 scripts timed out after 20 s (wide bit-vector
+multiplication; Z3 answers in ~0.1 s), and RZ3 never decides floating-point, array,
+string or quantified inputs it was not tested on. Pre-fix timings are not comparable.
+
 ### Added
 - `rz3::driver::check_script`, `rz3::eval` (exact model evaluation used to certify
   every `sat`), `Parser::strict`/`Parser::error`, `Command::Skipped`.

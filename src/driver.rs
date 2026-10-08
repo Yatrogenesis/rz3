@@ -14,6 +14,9 @@ pub fn check_script(input: &str) -> Result<Vec<SolverResult>, String> {
     let mut solver = Rz3Solver::new();
     let mut results = Vec::new();
     while let Some(command) = parser.parse_command() {
+        if parser.error().is_some() {
+            break;
+        }
         match command {
             Command::DeclareFun(name, params, ret) => {
                 solver.declare_fun_signature(name, params, ret);

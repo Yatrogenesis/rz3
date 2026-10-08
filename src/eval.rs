@@ -58,7 +58,31 @@ fn bool_of(v: Option<Value>) -> Option<bool> {
 /// Evaluate `expr`; `None` when it contains something this evaluator does not interpret
 /// (uninterpreted applications, arrays, strings, floating point, quantifiers, ...).
 pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> {
+    ev(expr, model, &FunTable::new())
+}
+
+/// Interpretation of uninterpreted functions: name -> (argument values -> result).
+pub type FunTable = BTreeMap<String, Vec<(Vec<Value>, Value)>>;
+
+/// Like [`eval`], with declared functions interpreted by `funs`.
+pub fn eval_with(
+    expr: &Expr,
+    model: &BTreeMap<String, ModelValue>,
+    funs: &FunTable,
+) -> Option<Value> {
+    ev(expr, model, funs)
+}
+
+fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Option<Value> {
     match expr {
+        Expr::App(name, args) => {
+            let values: Option<Vec<Value>> = args.iter().map(|a| ev(a, model, funs)).collect();
+            let values = values?;
+            funs.get(name)?
+                .iter()
+                .find(|(known, _)| *known == values)
+                .map(|(_, result)| result.clone())
+        }
         Expr::Bool(b) => Some(Value::Bool(*b)),
         Expr::Int(i) => Some(Value::Num(BigRational::from_integer(BigInt::from(*i)))),
         Expr::Real(m, s) => Some(Value::Num(decimal(*m, *s))),
@@ -75,35 +99,35 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
             Some(ModelValue::Float(_)) => None,
             None => default_value(ty),
         },
-        Expr::Not(a) => Some(Value::Bool(!bool_of(eval(a, model))?)),
+        Expr::Not(a) => Some(Value::Bool(!bool_of(ev(a, model, funs))?)),
         Expr::And(args) => {
             let mut all = true;
             for a in args {
-                all &= bool_of(eval(a, model))?;
+                all &= bool_of(ev(a, model, funs))?;
             }
             Some(Value::Bool(all))
         }
         Expr::Or(args) => {
             let mut any = false;
             for a in args {
-                any |= bool_of(eval(a, model))?;
+                any |= bool_of(ev(a, model, funs))?;
             }
             Some(Value::Bool(any))
         }
         Expr::Implies(a, b) => {
-            let (x, y) = (bool_of(eval(a, model))?, bool_of(eval(b, model))?);
+            let (x, y) = (bool_of(ev(a, model, funs))?, bool_of(ev(b, model, funs))?);
             Some(Value::Bool(!x || y))
         }
         Expr::Ite(c, t, e) => {
-            if bool_of(eval(c, model))? {
-                eval(t, model)
+            if bool_of(ev(c, model, funs))? {
+                ev(t, model, funs)
             } else {
-                eval(e, model)
+                ev(e, model, funs)
             }
         }
-        Expr::Eq(a, b) => Some(Value::Bool(eval(a, model)? == eval(b, model)?)),
+        Expr::Eq(a, b) => Some(Value::Bool(ev(a, model, funs)? == ev(b, model, funs)?)),
         Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b) => {
-            let (Value::Num(x), Value::Num(y)) = (eval(a, model)?, eval(b, model)?) else {
+            let (Value::Num(x), Value::Num(y)) = (ev(a, model, funs)?, ev(b, model, funs)?) else {
                 return None;
             };
             Some(Value::Bool(match expr {
@@ -116,7 +140,7 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
         Expr::Add(args) => {
             let mut sum = BigRational::zero();
             for a in args {
-                let Value::Num(v) = eval(a, model)? else {
+                let Value::Num(v) = ev(a, model, funs)? else {
                     return None;
                 };
                 sum += v;
@@ -126,7 +150,7 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
         Expr::Mul(args) => {
             let mut prod = BigRational::one();
             for a in args {
-                let Value::Num(v) = eval(a, model)? else {
+                let Value::Num(v) = ev(a, model, funs)? else {
                     return None;
                 };
                 prod *= v;
@@ -135,14 +159,14 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
         }
         Expr::Sub(args) => {
             let (first, rest) = args.split_first()?;
-            let Value::Num(mut acc) = eval(first, model)? else {
+            let Value::Num(mut acc) = ev(first, model, funs)? else {
                 return None;
             };
             if rest.is_empty() {
                 return Some(Value::Num(-acc));
             }
             for a in rest {
-                let Value::Num(v) = eval(a, model)? else {
+                let Value::Num(v) = ev(a, model, funs)? else {
                     return None;
                 };
                 acc -= v;
@@ -150,7 +174,7 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
             Some(Value::Num(acc))
         }
         Expr::Div(a, b) => {
-            let (Value::Num(x), Value::Num(y)) = (eval(a, model)?, eval(b, model)?) else {
+            let (Value::Num(x), Value::Num(y)) = (ev(a, model, funs)?, ev(b, model, funs)?) else {
                 return None;
             };
             if y.is_zero() {
@@ -160,13 +184,13 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
             }
         }
         Expr::BvNot(a) => {
-            let Value::Bv(v, w) = eval(a, model)? else {
+            let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;
             };
             Some(Value::Bv(!v & mask(w), w))
         }
         Expr::BvExtract(h, l, a) => {
-            let Value::Bv(v, w) = eval(a, model)? else {
+            let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;
             };
             if l > h || *h >= w {
@@ -176,7 +200,8 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
             Some(Value::Bv((v >> l) & mask(width), width))
         }
         Expr::BvConcat(a, b) => {
-            let (Value::Bv(hi, wh), Value::Bv(lo, wl)) = (eval(a, model)?, eval(b, model)?) else {
+            let (Value::Bv(hi, wh), Value::Bv(lo, wl)) = (ev(a, model, funs)?, ev(b, model, funs)?)
+            else {
                 return None;
             };
             if wh + wl > 64 {
@@ -197,7 +222,8 @@ pub fn eval(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Option<Value> 
         | Expr::BvUlt(a, b)
         | Expr::BvSle(a, b)
         | Expr::BvSlt(a, b) => {
-            let (Value::Bv(x, w), Value::Bv(y, wy)) = (eval(a, model)?, eval(b, model)?) else {
+            let (Value::Bv(x, w), Value::Bv(y, wy)) = (ev(a, model, funs)?, ev(b, model, funs)?)
+            else {
                 return None;
             };
             if w != wy {
@@ -248,8 +274,8 @@ pub enum Verdict {
     Unknown,
 }
 
-pub fn holds(expr: &Expr, model: &BTreeMap<String, ModelValue>) -> Verdict {
-    match eval(expr, model) {
+pub fn holds(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Verdict {
+    match ev(expr, model, funs) {
         Some(Value::Bool(true)) => Verdict::True,
         Some(Value::Bool(false)) => Verdict::False,
         _ => Verdict::Unknown,

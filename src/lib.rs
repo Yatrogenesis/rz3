@@ -760,6 +760,24 @@ impl Rz3Solver {
         }
     }
 
+    /// Function interpretation implied by the Ackermann variables of the current model.
+    fn function_table(&self, model: &BTreeMap<String, ModelValue>) -> crate::eval::FunTable {
+        let mut table = crate::eval::FunTable::new();
+        for (name, entries) in &self.app_by_fn {
+            for (args, var) in entries {
+                let values: Option<Vec<_>> =
+                    args.iter().map(|a| crate::eval::eval(a, model)).collect();
+                if let (Some(values), Some(result)) = (values, crate::eval::eval(var, model)) {
+                    table
+                        .entry(name.clone())
+                        .or_default()
+                        .push((values, result));
+                }
+            }
+        }
+        table
+    }
+
     /// SAT literal for a bit-vector comparison/equality. If the encoder cannot express
     /// it, a free literal is returned and the solver is flagged incomplete (no Sat).
     fn bv_predicate(&mut self, expr: &Expr) -> i32 {
@@ -894,11 +912,20 @@ impl Rz3Solver {
                     // reported (that would be a wrong Sat); formulas the evaluator cannot
                     // interpret (arrays, strings, floating point, ...) are not judged.
                     let full_model = self.raw_model();
-                    if self
-                        .processed
-                        .iter()
-                        .any(|f| crate::eval::holds(f, &full_model) == crate::eval::Verdict::False)
-                    {
+                    let funs = self.function_table(&full_model);
+                    // Both layers are checked: what the theories were given (`processed`)
+                    // and what the user asserted (`assertion_history`, typed only), so a
+                    // wrong rewrite in `ite` lifting, Ackermann reduction or the simplifier
+                    // cannot hide behind the formula it produced.
+                    let none = crate::eval::FunTable::new();
+                    let violated = self.processed.iter().any(|f| {
+                        crate::eval::holds(f, &full_model, &none) == crate::eval::Verdict::False
+                    }) || self.assertion_history.iter().any(|f| {
+                        let typed = self.resolve_expr_types(f);
+                        crate::eval::holds(&typed, &full_model, &funs)
+                            == crate::eval::Verdict::False
+                    });
+                    if violated {
                         return SolverResult::Unknown;
                     }
                     return SolverResult::Sat;

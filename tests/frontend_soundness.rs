@@ -110,7 +110,16 @@ fn text_path_never_weakens_a_formula() {
         ("predicate congruence", "(assert (= a b))(assert (pr (+ a 1)))(assert (not (pr (+ b 1))))", Unsat),
         ("function sat", "(assert (not (= (f a) (f b))))", Sat),
         ("distinct on applications", "(assert (distinct (f a) (f b) (f c)))(assert (= a b))", Unsat),
+        // constant folding must not wrap around i64
+        ("i64 overflow in +", "(assert (> (+ 9223372036854775807 1) 0))", Sat),
+        ("i64 overflow in + twice", "(assert (> (+ 9223372036854775807 9223372036854775807) 0))", Sat),
+        ("i64 overflow in *", "(assert (> (* 4611686018427387904 2) 0))", Sat),
+        ("i64 overflow in * (square)", "(assert (> (* 3037000500 3037000500) 0))", Sat),
+        ("i64 overflow in -", "(assert (< (- (- 9223372036854775807) 2) 0))", Sat),
+        ("i64 overflow with variable", "(assert (> (* a 4611686018427387904 2) 0))(assert (= a 1))", Sat),
+        ("tiny decimal", "(assert (= x 0.00000000000000000001))(assert (< x 0.000000000000000000005))", Unsat),
         // front end must reject, not guess
+        ("error inside the last command", "(assert (> a 0))(check-sat ')", Error),
         ("undeclared symbol", "(assert (> zz 1))", Error),
         ("unsupported operator mod", "(assert (= (mod a 2) 5))", Error),
         ("numeral beyond 64 bits", "(assert (> a 99999999999999999999))(assert (< a 0))", Error),

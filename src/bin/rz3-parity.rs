@@ -146,6 +146,9 @@ fn run_rz3_input(input: &str) -> Result<Vec<CheckResult>, String> {
     let mut solver = Rz3Solver::new();
     let mut results = Vec::new();
     while let Some(command) = parser.parse_command() {
+        if parser.error().is_some() {
+            break;
+        }
         match command {
             SmtCommand::SetLogic(_) | SmtCommand::SetOption(_, _) | SmtCommand::SetInfo(_, _) => {}
             SmtCommand::DeclareFun(name, params, return_type) => {
