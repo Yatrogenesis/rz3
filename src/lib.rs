@@ -39,6 +39,7 @@ pub mod theory;
 use crate::ast::{Expr, ModelValue, Type};
 use crate::sat::CdclSolver;
 use crate::tactic::{Simplifier, SolveEqs, TacticEngine};
+use crate::theory::array_reduce::ArrayReducer;
 use crate::theory::cc::Cc;
 use crate::theory::fp::FpSolver;
 use crate::theory::linarith::LinArith;
@@ -110,6 +111,8 @@ pub struct Stats {
     pub theory_conflicts: u64,
     pub branches: u64,
     pub pivots: u64,
+    pub array_instances: u64,
+    pub sat: crate::sat::SatStats,
     /// Why the last `check()` answered `Unknown`, if it did.
     pub unknown_reason: Option<&'static str>,
     pub atoms: usize,
@@ -131,6 +134,7 @@ pub struct Rz3Solver {
 
     lin: LinArith,
     cc: Cc,
+    arrays: ArrayReducer,
     /// Comparison atoms with nonlinear content (decided or declined by the NLA theory).
     nla_atoms: Vec<(Expr, i32)>,
     /// Array / string / floating-point / quantifier content is present, so the generic
@@ -159,6 +163,8 @@ pub struct Rz3Solver {
     app_by_fn: BTreeMap<String, Vec<(Vec<Expr>, Expr)>>,
     /// Fresh variables standing for `div`/`to_int` terms (memoised by the reduced term).
     def_vars: BTreeMap<Expr, Expr>,
+    /// Fresh variables standing for term-level `ite` (memoised by the reduced term).
+    ite_vars: BTreeMap<Expr, Expr>,
     /// Every formula handed to the theories (after `ite` lifting, Ackermann reduction and
     /// simplification). A satisfiable verdict is certified by evaluating all of them.
     processed: Vec<Expr>,
@@ -186,6 +192,7 @@ impl Rz3Solver {
             tactic_engine,
             lin: LinArith::new(),
             cc: Cc::new(),
+            arrays: ArrayReducer::new(),
             nla_atoms: Vec::new(),
             slow: false,
             euf: EufSolver::new(),
@@ -203,6 +210,7 @@ impl Rz3Solver {
             app_vars: BTreeMap::new(),
             app_by_fn: BTreeMap::new(),
             def_vars: BTreeMap::new(),
+            ite_vars: BTreeMap::new(),
             processed: Vec::new(),
         }
     }
@@ -214,6 +222,19 @@ impl Rz3Solver {
 
     /// Phase counters accumulated so far.
     pub fn stats(&self) -> Stats {
+        if std::env::var_os("RZ3_ATOMS").is_some() {
+            let mut hist: BTreeMap<String, usize> = BTreeMap::new();
+            for e in self.expr_to_lit.keys() {
+                let name = format!("{e:?}");
+                let head: String = name.chars().take_while(|c| c.is_alphanumeric()).collect();
+                *hist.entry(head).or_default() += 1;
+            }
+            eprintln!("atoms by kind: {hist:?}");
+            eprintln!(
+                "arrays (sel_vars, sources, deferred, indices): {:?}",
+                self.arrays.sizes()
+            );
+        }
         let mut st = self.stats.clone();
         st.atoms = self.expr_to_lit.len();
         st.sat_vars = self.next_sat_var;
@@ -251,6 +272,7 @@ impl Rz3Solver {
         self.tactic_engine = te;
         self.lin = LinArith::new();
         self.cc = Cc::new();
+        self.arrays = ArrayReducer::new();
         self.nla_atoms = Vec::new();
         self.slow = false;
         self.euf = EufSolver::new();
@@ -264,6 +286,7 @@ impl Rz3Solver {
         self.app_vars = BTreeMap::new();
         self.app_by_fn = BTreeMap::new();
         self.def_vars = BTreeMap::new();
+        self.ite_vars = BTreeMap::new();
         self.processed = Vec::new();
 
         self.symbol_table = sym;
@@ -296,7 +319,20 @@ impl Rz3Solver {
         for lemma in def_lemmas {
             self.assert_no_track(&lemma);
         }
+        let mut ite_lemmas = Vec::new();
+        let typed = self.eliminate_ite(&typed, &mut ite_lemmas);
+        for lemma in ite_lemmas {
+            self.assert_no_track(&lemma);
+        }
         let typed = self.lift_ite(&typed);
+        let mut array_lemmas = Vec::new();
+        let typed = self.arrays.reduce(&typed, &mut array_lemmas);
+        for lemma in array_lemmas {
+            self.assert_no_track(&lemma);
+        }
+        if self.arrays.truncated {
+            self.incomplete = true;
+        }
         let mut lemmas = Vec::new();
         let typed = self.ackermannize(&typed, &mut lemmas);
         for lemma in lemmas {
@@ -323,6 +359,54 @@ impl Rz3Solver {
         self.fp.assert(&simplified);
         let lit = self.tseitin(&simplified);
         let _ = self.sat_solver.add_clause(vec![lit]);
+    }
+
+    /// Share `ite` instead of duplicating the formula around it.
+    ///
+    /// A term-level `ite(c, t, e)` becomes a fresh variable `v` of the same sort together with
+    /// `(c -> v = t) /\ (!c -> v = e)`; a Boolean `ite` becomes `(c /\ t) \/ (!c /\ e)`.
+    /// Splitting every atom that contains an `ite` (the old `lift_ite`) doubles the formula
+    /// per `ite` and exploded on array-heavy inputs (23k atoms from a few hundred bytes).
+    /// `lift_ite` stays as the fallback for an `ite` whose sort cannot be determined.
+    fn eliminate_ite(&mut self, expr: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        if matches!(expr, Expr::ForAll(_, _) | Expr::Exists(_, _)) {
+            return expr.clone();
+        }
+        let rebuilt = expr.map_children(&mut |c| self.eliminate_ite(c, lemmas));
+        let Expr::Ite(c, t, e) = &rebuilt else {
+            return rebuilt;
+        };
+        let ty = match (self.infer_type(t), self.infer_type(e)) {
+            (Some(Type::Real), Some(Type::Int | Type::Real))
+            | (Some(Type::Int), Some(Type::Real)) => Some(Type::Real),
+            (Some(a), _) => Some(a),
+            (None, b) => b,
+        };
+        match ty {
+            Some(Type::Bool) => Expr::Or(vec![
+                Expr::And(vec![(**c).clone(), (**t).clone()]),
+                Expr::And(vec![Expr::Not(c.clone()), (**e).clone()]),
+            ]),
+            Some(ty) if ty != Type::Unknown => {
+                if let Some(v) = self.ite_vars.get(&rebuilt) {
+                    return v.clone();
+                }
+                let v = Expr::Var(format!("__ite_{}", self.ite_vars.len()), ty);
+                lemmas.push(Expr::And(vec![
+                    Expr::Or(vec![
+                        Expr::Not(c.clone()),
+                        Expr::Eq(Box::new(v.clone()), t.clone()),
+                    ]),
+                    Expr::Or(vec![
+                        (**c).clone(),
+                        Expr::Eq(Box::new(v.clone()), e.clone()),
+                    ]),
+                ]));
+                self.ite_vars.insert(rebuilt.clone(), v.clone());
+                v
+            }
+            _ => rebuilt,
+        }
     }
 
     /// Replace every `ite` by plain boolean structure so that no theory ever sees one.
@@ -1128,6 +1212,7 @@ impl Rz3Solver {
             };
             self.stats.sat_ns += sat_started.elapsed().as_nanos();
             self.stats.pivots = self.lin.pivots();
+            self.stats.sat = self.sat_solver.stats;
             self.stats.theory_conflicts = self.lin.conflicts;
             self.stats.lin_ns = self.lin.time_ns;
             match status {
@@ -1173,6 +1258,28 @@ impl Rz3Solver {
                     Expr::Ge(Box::new(x), Box::new(Expr::Int(high))),
                 ]));
                 continue;
+            }
+
+            // Lazily instantiated array lemmas: add those the current model violates.
+            if self.arrays.active() {
+                let full_model = self.raw_model();
+                let funs = self.function_table(&full_model);
+                let violated = self.arrays.take_violated(&|lemma| match crate::eval::holds(
+                    lemma,
+                    &full_model,
+                    &funs,
+                ) {
+                    crate::eval::Verdict::True => Some(true),
+                    crate::eval::Verdict::False => Some(false),
+                    crate::eval::Verdict::Unknown => None,
+                });
+                if !violated.is_empty() {
+                    self.stats.array_instances += violated.len() as u64;
+                    for lemma in violated {
+                        self.assert(&lemma);
+                    }
+                    continue;
+                }
             }
 
             let (array_lemmas, quant_lemmas, string_lemmas) = if self.slow {

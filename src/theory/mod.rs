@@ -1,4 +1,5 @@
 pub mod array;
+pub mod array_reduce;
 pub mod bv;
 pub mod cc;
 pub mod euf;

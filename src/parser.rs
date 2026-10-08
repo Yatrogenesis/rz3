@@ -401,7 +401,16 @@ impl<'a> Parser<'a> {
                     None => self.fail(format!("unsupported sort '{other}'")),
                 },
             },
-            Some(Token::LParen) => self.parse_indexed_type(),
+            Some(Token::LParen) => {
+                if self.peek_token() == Some(&Token::Symbol("Array".to_string())) {
+                    self.next_token();
+                    let index = self.parse_type()?;
+                    let element = self.parse_type()?;
+                    self.expect_rparen()?;
+                    return Some(Type::Array(Box::new(index), Box::new(element)));
+                }
+                self.parse_indexed_type()
+            }
             _ => self.fail("expected a sort"),
         }
     }
@@ -810,6 +819,20 @@ impl<'a> Parser<'a> {
                 }
             },
             Some(Token::LParen) => {
+                if self.peek_token() == Some(&Token::Symbol("as".to_string())) {
+                    self.next_token();
+                    let what = self.expect_symbol("'const'")?;
+                    if what != "const" {
+                        return self.fail("unsupported 'as' qualification");
+                    }
+                    let ty = self.parse_type()?;
+                    self.expect_rparen()?;
+                    let mut args = self.parse_args()?;
+                    if args.len() != 1 || !matches!(ty, Type::Array(_, _)) {
+                        return self.fail("malformed constant array");
+                    }
+                    return Some(Expr::ConstArray(ty, Box::new(args.remove(0))));
+                }
                 if self.expect_symbol("'_'")? != "_" {
                     return self.fail("unsupported expression head");
                 }
@@ -1031,6 +1054,20 @@ impl<'a> Parser<'a> {
                     Box::new(Expr::Ge(Box::new(x.clone()), Box::new(Expr::Int(0)))),
                     Box::new(x.clone()),
                     Box::new(Expr::Sub(vec![Expr::Int(0), x])),
+                ))
+            }
+            "select" => {
+                self.arity(op, &args, 2, Some(2))?;
+                let mut it = args.into_iter();
+                Some(Expr::Select(Box::new(it.next()?), Box::new(it.next()?)))
+            }
+            "store" => {
+                self.arity(op, &args, 3, Some(3))?;
+                let mut it = args.into_iter();
+                Some(Expr::Store(
+                    Box::new(it.next()?),
+                    Box::new(it.next()?),
+                    Box::new(it.next()?),
                 ))
             }
             "to_real" => {

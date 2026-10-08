@@ -288,3 +288,46 @@ fn uninterpreted_sorts_agree_with_the_standard() {
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const ARRAY_HEAD: &str = "(set-logic QF_ALIA)(declare-fun A () (Array Int Int))(declare-fun B () (Array Int Int))(declare-fun C () (Array Int Int))\
+(declare-fun i () Int)(declare-fun j () Int)(declare-fun k () Int)(declare-fun v () Int)(declare-fun m () Bool)";
+
+#[test]
+fn arrays_agree_with_the_standard() {
+    use Want::*;
+    let cases: &[(&str, &str, Want)] = &[
+        ("read over write same index", "(assert (not (= (select (store A i v) i) v)))", Unsat),
+        ("read over write other index", "(assert (not (= i j)))(assert (not (= (select (store A i v) j) (select A j))))", Unsat),
+        ("read over write sat", "(assert (= (select (store A i v) j) 5))(assert (not (= (select A j) 5)))", Sat),
+        ("store twice", "(assert (not (= (select (store (store A i 1) j 2) i) 1)))(assert (not (= i j)))", Unsat),
+        ("extensionality", "(assert (not (= A B)))(assert (= (select A i) (select B i)))(assert (= (select A j) (select B j)))", Sat),
+        ("extensionality forces witness", "(assert (not (= (store A i (select A i)) A)))", Unsat),
+        ("equal arrays equal reads", "(assert (= A B))(assert (not (= (select A i) (select B i))))", Unsat),
+        ("congruence of select", "(assert (= i j))(assert (not (= (select A i) (select A j))))", Unsat),
+        ("store identity", "(assert (not (= (store (store A i v) i v) (store A i v))))", Unsat),
+        ("const array", "(assert (not (= (select ((as const (Array Int Int)) 7) i) 7)))", Unsat),
+        ("const array sat", "(assert (= (select ((as const (Array Int Int)) 7) i) 7))", Sat),
+        ("array ite", "(assert (= (select (ite m A B) i) 3))(assert m)(assert (not (= (select A i) 3)))", Unsat),
+        ("swap", "(assert (= B (store (store A i (select A j)) j (select A i))))(assert (not (= (select B i) (select A j))))", Unsat),
+        ("swap sat", "(assert (= B (store (store A i (select A j)) j (select A i))))(assert (= (select B j) (select A i)))", Sat),
+        ("arrays differ", "(assert (not (= A B)))(assert (= A C))(assert (= B C))", Unsat),
+        ("integer index arithmetic", "(assert (= (select A (+ i 1)) 4))(assert (= j (+ i 1)))(assert (not (= (select A j) 4)))", Unsat),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, body, want)| {
+            let script = format!("{ARRAY_HEAD}{body}(check-sat)");
+            let got = check_script(&script).map(|mut v| v.remove(0));
+            let ok = matches!(
+                (want, &got),
+                (Want::Sat, Ok(SolverResult::Sat)) | (Want::Unsat, Ok(SolverResult::Unsat))
+            );
+            if ok {
+                None
+            } else {
+                Some(format!("{name}: wanted {want:?}, got {got:?}"))
+            }
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -155,7 +155,18 @@ pub struct CdclSolver {
     /// The solver was unwound outside `solve_with`, so the theory must be re-synchronised.
     hook_dirty: bool,
     restarts: u64,
+    /// Search counters (propagated literals, decisions, conflicts) for profiling.
+    pub stats: SatStats,
     pub ok: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SatStats {
+    pub propagations: u64,
+    pub decisions: u64,
+    pub conflicts: u64,
+    pub restarts: u64,
+    pub learned_clauses: u64,
 }
 
 impl Default for CdclSolver {
@@ -200,6 +211,7 @@ impl CdclSolver {
             th_head: 0,
             hook_dirty: false,
             restarts: 0,
+            stats: SatStats::default(),
             ok: true,
         }
     }
@@ -333,6 +345,7 @@ impl CdclSolver {
         while self.qhead < self.trail.len() {
             let lit = self.trail[self.qhead];
             self.qhead += 1;
+            self.stats.propagations += 1;
             let lit_idx = self.lit_to_idx(lit);
             let mut i = 0;
             while i < self.watches[lit_idx].len() {
@@ -433,6 +446,7 @@ impl CdclSolver {
             }
             if let Some(c) = conflict {
                 conflicts_total += 1;
+                self.stats.conflicts += 1;
                 conflicts_this_restart += 1;
                 if let Some(d) = deadline {
                     if conflicts_total % 64 == 0 && std::time::Instant::now() > d {
@@ -450,6 +464,7 @@ impl CdclSolver {
             // 2. Restart?
             if conflicts_this_restart >= restart_limit {
                 self.restarts += 1;
+                self.stats.restarts += 1;
                 restart_limit = 100 * luby(self.restarts);
                 conflicts_this_restart = 0;
                 self.backtrack_with(0, th);
@@ -459,6 +474,7 @@ impl CdclSolver {
             match self.pick_branching_variable() {
                 Some(var) => {
                     self.current_level += 1;
+                    self.stats.decisions += 1;
                     self.trail_lim.push(self.trail.len());
                     th.new_level();
                     let lit = if self.phases[var] == Assignment::True {
@@ -590,6 +606,7 @@ impl CdclSolver {
         } else {
             let lbd = self.calculate_lbd(&learnt);
             let idx = self.clauses.push(&learnt, true, lbd);
+            self.stats.learned_clauses += 1;
             self.watch_clause(idx);
             self.assign(learnt[0], self.current_level, Some(idx));
         }

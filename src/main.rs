@@ -122,6 +122,15 @@ fn print_stats(solver: &Rz3Solver) {
         st.atoms,
         st.sat_vars
     );
+    eprintln!(
+        "stats: array_instances={} sat_propagations={} sat_decisions={} sat_conflicts={} sat_restarts={} learned={}",
+        st.array_instances,
+        st.sat.propagations,
+        st.sat.decisions,
+        st.sat.conflicts,
+        st.sat.restarts,
+        st.sat.learned_clauses
+    );
     if let Some(why) = st.unknown_reason {
         eprintln!("stats: unknown_reason={why}");
     }

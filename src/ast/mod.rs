@@ -71,6 +71,7 @@ impl Expr {
                 }
             }
             Expr::Store(a, _, _) => a.get_type(),
+            Expr::ConstArray(ty, _) => ty.clone(),
 
             Expr::StrConst(_) | Expr::StrConcat(_) => Type::String,
 
@@ -223,6 +224,7 @@ impl Expr {
             Expr::BvNot(a) => Expr::BvNot(b(a, f)),
             Expr::StrLen(a) => Expr::StrLen(b(a, f)),
             Expr::ToInt(a) => Expr::ToInt(b(a, f)),
+            Expr::ConstArray(ty, a) => Expr::ConstArray(ty.clone(), b(a, f)),
             Expr::IsInt(a) => Expr::IsInt(b(a, f)),
             Expr::IntDiv(x, y) => Expr::IntDiv(b(x, f), b(y, f)),
             Expr::IntMod(x, y) => Expr::IntMod(b(x, f), b(y, f)),
@@ -384,6 +386,8 @@ pub enum Expr {
     BvExtract(usize, usize, Box<Expr>), // high, low, expr
     BvConcat(Box<Expr>, Box<Expr>),
     // Arrays
+    /// `((as const (Array I E)) v)`: the array that maps every index to `v`.
+    ConstArray(Type, Box<Expr>),
     Select(Box<Expr>, Box<Expr>),           // Array, Index
     Store(Box<Expr>, Box<Expr>, Box<Expr>), // Array, Index, Value
     // Quantifiers
