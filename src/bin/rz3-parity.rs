@@ -154,7 +154,9 @@ fn run_rz3_input(input: &str) -> Result<Vec<CheckResult>, String> {
             SmtCommand::DeclareFun(name, params, return_type) => {
                 solver.declare_fun_signature(name, params, return_type);
             }
-            SmtCommand::DefineFun(_, _, _, _) | SmtCommand::Skipped(_) => {}
+            SmtCommand::DefineFun(_, _, _, _)
+            | SmtCommand::Skipped(_)
+            | SmtCommand::DeclareSort(_) => {}
             SmtCommand::Assert(expr) => solver.assert(&expr),
             SmtCommand::Push(n) => {
                 for _ in 0..n {

@@ -125,6 +125,8 @@ pub struct Rz3Solver {
     app_vars: BTreeMap<Expr, Expr>,
     /// Per function symbol, the applications seen so far (for pairwise congruence lemmas).
     app_by_fn: BTreeMap<String, Vec<(Vec<Expr>, Expr)>>,
+    /// Fresh variables standing for `div`/`to_int` terms (memoised by the reduced term).
+    def_vars: BTreeMap<Expr, Expr>,
     /// Every formula handed to the theories (after `ite` lifting, Ackermann reduction and
     /// simplification). A satisfiable verdict is certified by evaluating all of them.
     processed: Vec<Expr>,
@@ -167,6 +169,7 @@ impl Rz3Solver {
             incomplete: false,
             app_vars: BTreeMap::new(),
             app_by_fn: BTreeMap::new(),
+            def_vars: BTreeMap::new(),
             processed: Vec::new(),
         }
     }
@@ -226,6 +229,7 @@ impl Rz3Solver {
         self.incomplete = false;
         self.app_vars = BTreeMap::new();
         self.app_by_fn = BTreeMap::new();
+        self.def_vars = BTreeMap::new();
         self.processed = Vec::new();
 
         self.symbol_table = sym;
@@ -245,6 +249,11 @@ impl Rz3Solver {
 
     fn assert_no_track_inner(&mut self, expr: &Expr) {
         let typed = self.resolve_expr_types(expr);
+        let mut def_lemmas = Vec::new();
+        let typed = self.eliminate_defs(&typed, &mut def_lemmas);
+        for lemma in def_lemmas {
+            self.assert_no_track(&lemma);
+        }
         let typed = self.lift_ite(&typed);
         let mut lemmas = Vec::new();
         let typed = self.ackermannize(&typed, &mut lemmas);
@@ -339,6 +348,91 @@ impl Rz3Solver {
             return with.clone();
         }
         expr.map_children(&mut |c| Self::replace_term(c, target, with))
+    }
+
+    /// Replace `div`, `mod`, `to_int` and `is_int` by fresh integer variables constrained
+    /// by their defining inequalities (SMT-LIB Euclidean division):
+    ///   `q = div x c`  <=>  `c*q <= x < c*q + |c|`   (c != 0)
+    ///   `q = to_int x` <=>  `q <= x < q + 1`
+    /// A divisor that may be zero leaves the quotient unconstrained there, as the standard
+    /// treats `div x 0` as an uninterpreted function; satisfiable verdicts are then
+    /// withheld (`incomplete`), unsat remains valid.
+    fn eliminate_defs(&mut self, expr: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        if matches!(expr, Expr::ForAll(_, _) | Expr::Exists(_, _)) {
+            return expr.clone();
+        }
+        let rebuilt = expr.map_children(&mut |c| self.eliminate_defs(c, lemmas));
+        match &rebuilt {
+            Expr::IntDiv(x, c) => self.division_variable(x, c, lemmas),
+            Expr::IntMod(x, c) => {
+                let q = self.division_variable(x, c, lemmas);
+                Expr::Sub(vec![(**x).clone(), Expr::Mul(vec![(**c).clone(), q])])
+            }
+            Expr::ToInt(x) => self.floor_variable(x, lemmas),
+            Expr::IsInt(x) => {
+                let q = self.floor_variable(x, lemmas);
+                Expr::Eq(Box::new(q), x.clone())
+            }
+            _ => rebuilt,
+        }
+    }
+
+    fn division_variable(&mut self, x: &Expr, c: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        let key = Expr::IntDiv(Box::new(x.clone()), Box::new(c.clone()));
+        if let Some(v) = self.def_vars.get(&key) {
+            return v.clone();
+        }
+        let q = Expr::Var(format!("__div_{}", self.def_vars.len()), Type::Int);
+        let cq = Expr::Mul(vec![c.clone(), q.clone()]);
+        let abs_c = match c.as_constant() {
+            Some(r) => {
+                Expr::from_rational(&if r < num_rational::BigRational::from_integer(0.into()) {
+                    -r
+                } else {
+                    r
+                })
+            }
+            None => Expr::Ite(
+                Box::new(Expr::Ge(Box::new(c.clone()), Box::new(Expr::Int(0)))),
+                Box::new(c.clone()),
+                Box::new(Expr::Sub(vec![Expr::Int(0), c.clone()])),
+            ),
+        };
+        let bounds = Expr::And(vec![
+            Expr::Le(Box::new(cq.clone()), Box::new(x.clone())),
+            Expr::Lt(Box::new(x.clone()), Box::new(Expr::Add(vec![cq, abs_c]))),
+        ]);
+        let nonzero_const = c
+            .as_constant()
+            .is_some_and(|r| r != num_rational::BigRational::from_integer(0.into()));
+        if nonzero_const {
+            lemmas.push(bounds);
+        } else {
+            self.incomplete = true;
+            lemmas.push(Expr::Or(vec![
+                Expr::Eq(Box::new(c.clone()), Box::new(Expr::Int(0))),
+                bounds,
+            ]));
+        }
+        self.def_vars.insert(key, q.clone());
+        q
+    }
+
+    fn floor_variable(&mut self, x: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        let key = Expr::ToInt(Box::new(x.clone()));
+        if let Some(v) = self.def_vars.get(&key) {
+            return v.clone();
+        }
+        let q = Expr::Var(format!("__toint_{}", self.def_vars.len()), Type::Int);
+        lemmas.push(Expr::And(vec![
+            Expr::Le(Box::new(q.clone()), Box::new(x.clone())),
+            Expr::Lt(
+                Box::new(x.clone()),
+                Box::new(Expr::Add(vec![q.clone(), Expr::Int(1)])),
+            ),
+        ]));
+        self.def_vars.insert(key, q.clone());
+        q
     }
 
     /// Ackermann reduction of declared function symbols.
@@ -609,7 +703,11 @@ impl Rz3Solver {
 
     pub fn get_model(&self) -> BTreeMap<String, ModelValue> {
         let mut model = self.raw_model();
-        model.retain(|name, _| !name.starts_with("__ack_"));
+        model.retain(|name, _| {
+            !(name.starts_with("__ack_")
+                || name.starts_with("__div_")
+                || name.starts_with("__toint_"))
+        });
         model
     }
 

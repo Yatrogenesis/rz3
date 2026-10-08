@@ -184,6 +184,37 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
                 Some(Value::Num(x / y))
             }
         }
+        Expr::IntDiv(a, b) | Expr::IntMod(a, b) => {
+            let (Value::Num(x), Value::Num(c)) = (ev(a, model, funs)?, ev(b, model, funs)?) else {
+                return None;
+            };
+            if c.is_zero() || !x.is_integer() || !c.is_integer() {
+                return None;
+            }
+            // Euclidean: x = c*q + r with 0 <= r < |c|.
+            let q = if c > BigRational::zero() {
+                (x.clone() / c.clone()).floor()
+            } else {
+                (x.clone() / c.clone()).ceil()
+            };
+            Some(Value::Num(if matches!(expr, Expr::IntDiv(_, _)) {
+                q
+            } else {
+                x - c * q
+            }))
+        }
+        Expr::ToInt(a) => {
+            let Value::Num(x) = ev(a, model, funs)? else {
+                return None;
+            };
+            Some(Value::Num(x.floor()))
+        }
+        Expr::IsInt(a) => {
+            let Value::Num(x) = ev(a, model, funs)? else {
+                return None;
+            };
+            Some(Value::Bool(x.is_integer()))
+        }
         Expr::BvNot(a) => {
             let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;

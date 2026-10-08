@@ -242,6 +242,8 @@ pub enum Command {
     SetLogic(String),
     SetOption(String, String),
     DeclareFun(String, Vec<Type>, Type),
+    /// `(declare-sort name 0)`: a new uninterpreted sort.
+    DeclareSort(String),
     /// The body is already expanded by the parser wherever the function is used;
     /// consumers must NOT also declare it as an uninterpreted function.
     DefineFun(String, Vec<(String, Type)>, Type, Expr),
@@ -269,6 +271,8 @@ pub struct Parser<'a> {
     strict: bool,
     error: Option<String>,
     consts: BTreeMap<String, Type>,
+    /// Declared sorts: `None` = uninterpreted, `Some(t)` = alias created by `define-sort`.
+    sorts: BTreeMap<String, Option<Type>>,
     funs: BTreeMap<String, usize>,
     macros: BTreeMap<String, Macro>,
     env: Vec<BTreeMap<String, Expr>>,
@@ -287,6 +291,7 @@ impl<'a> Parser<'a> {
             strict: false,
             error: None,
             consts: BTreeMap::new(),
+            sorts: BTreeMap::new(),
             funs: BTreeMap::new(),
             macros: BTreeMap::new(),
             env: Vec::new(),
@@ -390,7 +395,11 @@ impl<'a> Parser<'a> {
                 "Bool" => Some(Type::Bool),
                 "Int" => Some(Type::Int),
                 "Real" => Some(Type::Real),
-                other => self.fail(format!("unsupported sort '{other}'")),
+                other => match self.sorts.get(other) {
+                    Some(None) => Some(Type::Sort(other.to_string())),
+                    Some(Some(alias)) => Some(alias.clone()),
+                    None => self.fail(format!("unsupported sort '{other}'")),
+                },
             },
             Some(Token::LParen) => self.parse_indexed_type(),
             _ => self.fail("expected a sort"),
@@ -524,6 +533,36 @@ impl<'a> Parser<'a> {
                 } else {
                     Command::Pop(n)
                 }
+            }
+            "declare-sort" => {
+                let name = self.expect_symbol("a sort name")?;
+                match self.next_token() {
+                    Some(Token::Int(0)) => {}
+                    Some(Token::RParen) => {
+                        // `(declare-sort S)` without arity is accepted as arity 0.
+                        self.sorts.insert(name.clone(), None);
+                        return Some(Command::DeclareSort(name));
+                    }
+                    _ => return self.fail("parametric sorts are unsupported"),
+                }
+                self.expect_rparen()?;
+                if self.sorts.contains_key(&name) {
+                    return self.fail(format!("sort '{name}' is already declared"));
+                }
+                self.sorts.insert(name.clone(), None);
+                Command::DeclareSort(name)
+            }
+            "define-sort" => {
+                let name = self.expect_symbol("a sort name")?;
+                self.expect_lparen()?;
+                if self.peek_token() != Some(&Token::RParen) {
+                    return self.fail("parametric sort definitions are unsupported");
+                }
+                self.next_token();
+                let ty = self.parse_type()?;
+                self.expect_rparen()?;
+                self.sorts.insert(name.clone(), Some(ty));
+                Command::Skipped(format!("define-sort {name}"))
             }
             "declare-const" => {
                 let name = self.expect_symbol("a constant name")?;
@@ -975,6 +1014,36 @@ impl<'a> Parser<'a> {
             "/" => {
                 self.arity(op, &args, 2, None)?;
                 Self::fold_left(args, Expr::Div)
+            }
+            "div" | "mod" => {
+                self.arity(op, &args, 2, if op == "mod" { Some(2) } else { None })?;
+                let mk: fn(Box<Expr>, Box<Expr>) -> Expr = if op == "div" {
+                    Expr::IntDiv
+                } else {
+                    Expr::IntMod
+                };
+                Self::fold_left(args, mk)
+            }
+            "abs" => {
+                self.arity(op, &args, 1, Some(1))?;
+                let x = args.into_iter().next()?;
+                Some(Expr::Ite(
+                    Box::new(Expr::Ge(Box::new(x.clone()), Box::new(Expr::Int(0)))),
+                    Box::new(x.clone()),
+                    Box::new(Expr::Sub(vec![Expr::Int(0), x])),
+                ))
+            }
+            "to_real" => {
+                self.arity(op, &args, 1, Some(1))?;
+                args.into_iter().next()
+            }
+            "to_int" => {
+                self.arity(op, &args, 1, Some(1))?;
+                Some(Expr::ToInt(Box::new(args.into_iter().next()?)))
+            }
+            "is_int" => {
+                self.arity(op, &args, 1, Some(1))?;
+                Some(Expr::IsInt(Box::new(args.into_iter().next()?)))
             }
             "bvadd" => {
                 self.arity(op, &args, 2, None)?;

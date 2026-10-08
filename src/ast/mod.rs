@@ -14,6 +14,7 @@ impl Expr {
             | Expr::Gt(_, _)
             | Expr::Ge(_, _)
             | Expr::StrContains(_, _)
+            | Expr::IsInt(_)
             | Expr::BvUle(_, _)
             | Expr::BvUlt(_, _)
             | Expr::BvSle(_, _)
@@ -26,6 +27,9 @@ impl Expr {
             | Expr::Sub(_)
             | Expr::Mul(_)
             | Expr::Div(_, _)
+            | Expr::IntDiv(_, _)
+            | Expr::IntMod(_, _)
+            | Expr::ToInt(_)
             | Expr::StrLen(_) => Type::Int,
 
             Expr::Real(_, _) => Type::Real,
@@ -129,6 +133,40 @@ impl Expr {
         }
     }
 
+    /// Value of a closed numeric expression built from literals with `+ - * /`.
+    pub fn as_constant(&self) -> Option<num_rational::BigRational> {
+        use num_traits::Zero;
+        match self {
+            Expr::Int(_) | Expr::Real(_, _) | Expr::BigRat(_, _) => self.as_rational(),
+            Expr::Add(v) => v
+                .iter()
+                .try_fold(num_rational::BigRational::zero(), |a, x| {
+                    Some(a + x.as_constant()?)
+                }),
+            Expr::Mul(v) => v
+                .iter()
+                .try_fold(num_rational::BigRational::from_integer(1.into()), |a, x| {
+                    Some(a * x.as_constant()?)
+                }),
+            Expr::Sub(v) => match v.as_slice() {
+                [] => Some(num_rational::BigRational::zero()),
+                [only] => Some(-only.as_constant()?),
+                [first, rest @ ..] => rest
+                    .iter()
+                    .try_fold(first.as_constant()?, |a, x| Some(a - x.as_constant()?)),
+            },
+            Expr::Div(a, b) => {
+                let d = b.as_constant()?;
+                if d.is_zero() {
+                    None
+                } else {
+                    Some(a.as_constant()? / d)
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// True if `pred` holds for this node or any descendant.
     pub fn any_subterm(&self, pred: &dyn Fn(&Expr) -> bool) -> bool {
         if pred(self) {
@@ -184,6 +222,10 @@ impl Expr {
             Expr::Not(a) => Expr::Not(b(a, f)),
             Expr::BvNot(a) => Expr::BvNot(b(a, f)),
             Expr::StrLen(a) => Expr::StrLen(b(a, f)),
+            Expr::ToInt(a) => Expr::ToInt(b(a, f)),
+            Expr::IsInt(a) => Expr::IsInt(b(a, f)),
+            Expr::IntDiv(x, y) => Expr::IntDiv(b(x, f), b(y, f)),
+            Expr::IntMod(x, y) => Expr::IntMod(b(x, f), b(y, f)),
             Expr::BvExtract(h, l, a) => Expr::BvExtract(*h, *l, b(a, f)),
             Expr::Implies(x, y) => Expr::Implies(b(x, f), b(y, f)),
             Expr::Eq(x, y) => Expr::Eq(b(x, f), b(y, f)),
@@ -317,6 +359,11 @@ pub enum Expr {
     Sub(Vec<Expr>),
     Mul(Vec<Expr>),
     Div(Box<Expr>, Box<Expr>),
+    /// SMT-LIB integer `div` / `mod` (Euclidean) and `to_int` / `is_int`.
+    IntDiv(Box<Expr>, Box<Expr>),
+    IntMod(Box<Expr>, Box<Expr>),
+    ToInt(Box<Expr>),
+    IsInt(Box<Expr>),
     App(String, Vec<Expr>), // Function application
     // Bit-vectors
     BvConst(u64, usize), // Value and width
@@ -358,6 +405,8 @@ pub enum Type {
     Float(fp::FloatSort),
     BitVec(usize),
     String,
+    /// User-declared uninterpreted sort (`declare-sort`).
+    Sort(String),
     Array(Box<Type>, Box<Type>), // Index Type, Element Type
     Fn(Vec<Type>, Box<Type>),    // Function type
 }

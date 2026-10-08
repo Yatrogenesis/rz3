@@ -28,7 +28,7 @@ class Gen:
         self.incr = False
         if profile == "incr":
             # the incremental driver draws its formulas from one of the other generators
-            self.profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw"])
+            self.profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts"])
             self.incr = True
 
     # --- terms ---
@@ -49,8 +49,16 @@ class Gen:
             return f"(ite {self.bool_term(d-1)} {self.int_term(d-1)} {self.int_term(d-1)})"
         if k < 0.90 and self.profile in ("uf", "mixed"):
             return f"(f {self.int_term(d-1)})"
-        if k < 0.95:
+        if k < 0.93:
             return f"(let ((t {self.int_term(d-1)})) (+ t {r.choice(['t','1','a'])}))"
+        if k < 0.955:
+            return f"(div {self.int_term(d-1)} {r.choice(['2','3','-2','5'])})"
+        if k < 0.97:
+            return f"(mod {self.int_term(d-1)} {r.choice(['2','3','-3','4'])})"
+        if k < 0.985:
+            return f"(abs {self.int_term(d-1)})"
+        if k < 0.995 and self.profile in ("mixed", "lra"):
+            return f"(to_int {self.real_term(d-1)})"
         return r.choice(["a", "b"])
 
     def real_term(self, d):
@@ -68,6 +76,8 @@ class Gen:
             return f"(* {r.randint(-2, 3)}.5 {self.real_term(d-1)})"
         if k < 0.85:
             return f"(/ {self.real_term(d-1)} {r.choice(['2.0','4.0','3.0'])})"
+        if k < 0.92:
+            return f"(to_real {self.int_term(d-1)})"
         return f"(ite {self.bool_term(d-1)} {self.real_term(d-1)} {self.real_term(d-1)})"
 
     def bv_term(self, d):
@@ -117,6 +127,8 @@ class Gen:
                 f"(distinct (f a) (f b) (f c))",
                 f"(= (f a) {r.randint(0, 3)})",
             ])
+        if k == "bool" and self.profile in ("mixed", "lra") and r.random() < 0.15:
+            return f"(is_int {self.real_term(max(d-1,0))})"
         return r.choice(["m", "n", "o", "true", "false"])
 
     def bool_term(self, d):
@@ -193,8 +205,50 @@ class Gen:
             return f"(not {self.bvw_formula(d-1)})"
         return f"(=> {self.bvw_formula(d-1)} {self.bvw_formula(d-1)})"
 
+    # --- uninterpreted sorts ---
+    def sort_term(self, d):
+        r = self.r
+        if d <= 0 or r.random() < 0.4:
+            return r.choice(["s1", "s2", "s3", "s4"])
+        k = r.random()
+        if k < 0.6:
+            return f"(g {self.sort_term(d-1)})"
+        if k < 0.85:
+            return f"(kk {self.sort_term(d-1)} {self.sort_term(d-1)})"
+        return f"(ite {self.sort_atom(d-1)} {self.sort_term(d-1)} {self.sort_term(d-1)})"
+
+    def sort_atom(self, d):
+        r = self.r
+        k = r.random()
+        if k < 0.5:
+            return f"(= {self.sort_term(d)} {self.sort_term(d)})"
+        if k < 0.65:
+            return f"(distinct {self.sort_term(d)} {self.sort_term(d)} {self.sort_term(d)})"
+        if k < 0.85:
+            return f"(pp {self.sort_term(d)})"
+        return r.choice(["m", "n"])
+
+    def sort_formula(self, d):
+        r = self.r
+        if d <= 0 or r.random() < 0.35:
+            return self.sort_atom(max(d, 1))
+        k = r.random()
+        if k < 0.35:
+            return f"(and {self.sort_formula(d-1)} {self.sort_formula(d-1)})"
+        if k < 0.7:
+            return f"(or {self.sort_formula(d-1)} {self.sort_formula(d-1)})"
+        if k < 0.85:
+            return f"(not {self.sort_formula(d-1)})"
+        return f"(=> {self.sort_formula(d-1)} {self.sort_formula(d-1)})"
+
     def declarations(self):
         lines = ["(set-logic ALL)"]
+        if self.profile == "sorts":
+            lines += ["(declare-sort U 0)"]
+            lines += [f"(declare-fun s{i} () U)" for i in range(1, 5)]
+            lines += [f"(declare-fun {v} () Bool)" for v in "mn"]
+            lines += ["(declare-fun g (U) U)", "(declare-fun kk (U U) U)", "(declare-fun pp (U) Bool)"]
+            return lines
         lines += [f"(declare-fun {v} () Int)" for v in "abc"]
         lines += [f"(declare-const {v} Real)" for v in "xyz"]
         lines += [f"(declare-fun {v} () (_ BitVec 8))" for v in "pqs"]
@@ -205,6 +259,8 @@ class Gen:
         return lines
 
     def one_assertion(self, depth):
+        if self.profile == "sorts":
+            return f"(assert {self.sort_formula(depth)})"
         if self.profile == "bvw":
             return f"(assert {self.bvw_formula(depth)})"
         return f"(assert {self.bool_term(depth)})"
@@ -265,7 +321,7 @@ def run(bin_args, path):
 
 def one(i):
     rng = random.Random(SEED * 1_000_003 + i)
-    profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "incr"])
+    profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "incr"])
     text = Gen(rng, profile).script()
     path = os.path.join(OUT, f"case_{i}.smt2")
     with open(path, "w") as fh:

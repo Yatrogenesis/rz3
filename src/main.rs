@@ -56,7 +56,7 @@ fn real_main() {
             }
             // The parser expands `define-fun` bodies at every use site; declaring the
             // name here as an uninterpreted function would silently drop the body.
-            Command::DefineFun(_, _, _, _) | Command::Skipped(_) => {}
+            Command::DefineFun(_, _, _, _) | Command::Skipped(_) | Command::DeclareSort(_) => {}
             Command::Assert(expr) => solver.assert(&expr),
             Command::Push(n) => {
                 for _ in 0..n {
@@ -314,6 +314,7 @@ fn format_type(ty: &Type) -> String {
         ),
         Type::BitVec(width) => format!("(_ BitVec {})", width),
         Type::String => "String".to_string(),
+        Type::Sort(name) => name.clone(),
         Type::Array(index, value) => {
             format!("(Array {} {})", format_type(index), format_type(value))
         }

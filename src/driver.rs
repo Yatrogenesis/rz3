@@ -21,6 +21,7 @@ pub fn check_script(input: &str) -> Result<Vec<SolverResult>, String> {
             Command::DeclareFun(name, params, ret) => {
                 solver.declare_fun_signature(name, params, ret);
             }
+            Command::DeclareSort(_) => {}
             Command::Assert(expr) => solver.assert(&expr),
             Command::Push(n) => (0..n).for_each(|_| solver.push()),
             Command::Pop(n) => (0..n).for_each(|_| solver.pop()),
