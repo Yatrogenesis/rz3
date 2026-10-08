@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 1))
+(assert (= ((_ extract 0 0) (concat x)) #b1))
+(assert (= (concat x) #b0))
+(check-sat)

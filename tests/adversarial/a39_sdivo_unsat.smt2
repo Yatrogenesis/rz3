@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 64))(declare-const y (_ BitVec 64))
+(assert (bvsdivo x y))
+(assert (distinct x #x8000000000000000))
+(check-sat)

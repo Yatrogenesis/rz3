@@ -1,0 +1,6 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 64))(declare-const y (_ BitVec 64))
+(assert (bvumulo x y))
+(assert (= x #x00000000FFFFFFFF))
+(assert (= y #x0000000100000000))
+(check-sat)

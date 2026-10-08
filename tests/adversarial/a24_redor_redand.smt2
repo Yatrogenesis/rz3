@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 63))
+(assert (= (bvredor x) #b0))
+(assert (= (bvredand x) #b1))
+(check-sat)

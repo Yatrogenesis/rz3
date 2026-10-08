@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 1))(declare-const y (_ BitVec 1))
+(assert (= y #b0))
+(assert (distinct (bvudiv x y) #b1))
+(check-sat)

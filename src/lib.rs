@@ -1549,6 +1549,22 @@ impl Rz3Solver {
             let full_model = self.raw_model();
             let funs = self.function_table(&full_model);
             let none = crate::eval::FunTable::new();
+            // SMT-LIB makes `div`/`mod`/`/` by zero a total function of its arguments; the
+            // reduction treats each occurrence as a free value. That is exact only if no divisor
+            // is zero in the model, so a model with a zero (or unevaluable) divisor is not
+            // reported as sat.
+            let zero_divisor = self.assertion_history.iter().any(|f| {
+                self.resolve_expr_types(f).any_subterm(&|e| match e {
+                    Expr::IntDiv(_, d) | Expr::IntMod(_, d) | Expr::Div(_, d) => !matches!(
+                        crate::eval::eval(d, &full_model),
+                        Some(crate::eval::Value::Num(r)) if !num_traits::Zero::is_zero(&r)
+                    ),
+                    _ => false,
+                })
+            });
+            if zero_divisor {
+                return self.unknown("division by zero in the model");
+            }
             let violated =
                 self.processed.iter().any(|f| {
                     crate::eval::holds(f, &full_model, &none) == crate::eval::Verdict::False

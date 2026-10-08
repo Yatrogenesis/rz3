@@ -1,0 +1,6 @@
+(set-logic QF_NIA)
+(declare-const x Int)(declare-const w Int)(declare-const y Int)
+(assert (= y 0))(assert (not (= x w)))
+(assert (not (= (div x y) (div w y))))
+(assert (not (= (mod x y) (mod w y))))
+(check-sat)(get-model)

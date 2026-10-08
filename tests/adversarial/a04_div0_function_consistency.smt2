@@ -1,0 +1,5 @@
+(set-logic QF_NIA)
+(declare-const x Int)(declare-const y Int)(declare-const z Int)
+(assert (= y 0))(assert (= z 0))
+(assert (not (= (div x y) (div x z))))
+(check-sat)

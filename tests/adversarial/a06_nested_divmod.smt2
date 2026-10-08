@@ -1,0 +1,6 @@
+(set-logic QF_NIA)
+(declare-const x Int)(declare-const y Int)(declare-const z Int)
+(assert (> y 1))(assert (> z 1))
+(assert (= (mod (div x y) z) (- (div (mod x z) y) 1)))
+(assert (> x 50))
+(check-sat)(get-model)

@@ -1,0 +1,7 @@
+(set-logic QF_NIA)
+(declare-const x Int)(declare-const y Int)(declare-const b Bool)
+(assert (= (div x (ite b y 2)) 7))
+(assert (not b))
+(assert (or (> x 15) (< x 14)))
+(assert (< x 20))(assert (> x 0))
+(check-sat)(get-model)

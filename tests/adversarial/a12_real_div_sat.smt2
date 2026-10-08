@@ -1,0 +1,6 @@
+(set-logic QF_NRA)
+(declare-const x Real)(declare-const y Real)
+(assert (= (/ x y) 2.5))
+(assert (> y 1.0))(assert (< y 3.0))
+(assert (> (* x y) 3.0))
+(check-sat)(get-model)

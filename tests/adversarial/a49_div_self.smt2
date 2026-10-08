@@ -1,0 +1,5 @@
+(set-logic QF_NIA)
+(declare-const x Int)
+(assert (distinct x 0))
+(assert (distinct (div x x) 1))
+(check-sat)

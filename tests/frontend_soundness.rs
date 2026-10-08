@@ -98,6 +98,11 @@ fn text_path_never_weakens_a_formula() {
         ("mod by variable", "(assert (and (= (mod a c) 2) (= c 3) (= a 8)))", Sat),
         ("real division by variable", "(assert (and (= (/ x y) 2.0) (= y 3.0) (= x 6.0)))", Sat),
         ("real division by variable unsat", "(assert (and (= (/ x y) 2.0) (= y 3.0) (= x 7.0)))", Unsat),
+        // division by zero is a total function of its arguments (CVJ adversarial finding):
+        // independent free values per occurrence made these satisfiable; Z3 and cvc5 say unsat
+        ("div zero functional", "(assert (and (= c 0) (= (div a c) 3) (= (div a 0) 4)))", UnsatOrDecline),
+        ("mod zero functional", "(assert (and (= (mod a 0) (+ a 1)) (= (mod a 0) a)))", UnsatOrDecline),
+        ("real div zero functional", "(assert (and (= y 0.0) (= (/ x y) 1.0) (= (/ x 0.0) 2.0)))", UnsatOrDecline),
         ("mod nonzero range", "(assert (< (mod a 3) 0))", Unsat),
         ("mod by zero is a function", "(assert (and (= (mod a 0) 1) (= (mod a 0) 2)))", Unsat),
         ("let shadowing", "(assert (let ((a 1)) (let ((a 2)) (= a 3))))", Unsat),

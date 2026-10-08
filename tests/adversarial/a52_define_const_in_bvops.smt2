@@ -1,0 +1,6 @@
+(set-logic QF_BV)
+(define-const m (_ BitVec 64) #xFFFFFFFFFFFFFFFF)
+(declare-const x (_ BitVec 64))
+(assert (bvuaddo x m))
+(assert (= x #x0))
+(check-sat)
