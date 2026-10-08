@@ -628,20 +628,23 @@ impl<'a> Parser<'a> {
                 }
                 Command::DeclareFun(name, params, ret)
             }
-            "define-fun" => {
-                let name = self.expect_symbol("a function name")?;
-                self.expect_lparen()?;
+            "define-fun" | "define-const" => {
+                let name_ = self.expect_symbol("a function name")?;
+                let name = name_;
                 let mut params: Vec<(String, Type)> = Vec::new();
-                loop {
-                    match self.next_token() {
-                        Some(Token::RParen) => break,
-                        Some(Token::LParen) => {
-                            let pname = self.expect_symbol("a parameter name")?;
-                            let pty = self.parse_type()?;
-                            self.expect_rparen()?;
-                            params.push((pname, pty));
+                if op != "define-const" {
+                    self.expect_lparen()?;
+                    loop {
+                        match self.next_token() {
+                            Some(Token::RParen) => break,
+                            Some(Token::LParen) => {
+                                let pname = self.expect_symbol("a parameter name")?;
+                                let pty = self.parse_type()?;
+                                self.expect_rparen()?;
+                                params.push((pname, pty));
+                            }
+                            _ => return self.fail("malformed parameter list"),
                         }
-                        _ => return self.fail("malformed parameter list"),
                     }
                 }
                 let ret = self.parse_type()?;
@@ -1214,12 +1217,111 @@ impl<'a> Parser<'a> {
                     ),
                 })
             }
+            "bvite" => {
+                self.arity(op, &args, 3, Some(3))?;
+                let mut it = args.into_iter();
+                let (c, a, b) = (it.next()?, it.next()?, it.next()?);
+                Some(Expr::Ite(
+                    Box::new(Expr::Eq(Box::new(c), Box::new(Expr::BvConst(1, 1)))),
+                    Box::new(a),
+                    Box::new(b),
+                ))
+            }
+            "bvredor" | "bvredand" | "bvnego" => {
+                self.arity(op, &args, 1, Some(1))?;
+                let a = args.into_iter().next()?;
+                let Type::BitVec(w) = a.get_type() else {
+                    return self.fail(format!("'{op}' expects a bit-vector"));
+                };
+                if w > 64 {
+                    return self.fail("bit-vector width is unsupported (> 64)");
+                }
+                let ones = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
+                let bit = |c: Expr| {
+                    Expr::Ite(
+                        Box::new(c),
+                        Box::new(Expr::BvConst(1, 1)),
+                        Box::new(Expr::BvConst(0, 1)),
+                    )
+                };
+                let is = |v: u64| Expr::Eq(Box::new(a.clone()), Box::new(Expr::BvConst(v, w)));
+                Some(match op {
+                    "bvredor" => bit(Expr::Not(Box::new(is(0)))),
+                    "bvredand" => bit(is(ones)),
+                    _ => is(1u64 << (w - 1)),
+                })
+            }
+            "bvuaddo" | "bvsaddo" | "bvusubo" | "bvssubo" | "bvumulo" | "bvsmulo" | "bvsdivo" => {
+                self.arity(op, &args, 2, Some(2))?;
+                let mut it = args.into_iter();
+                let (a, b) = (it.next()?, it.next()?);
+                let Type::BitVec(w) = a.get_type() else {
+                    return self.fail(format!("'{op}' expects bit-vectors"));
+                };
+                let wide = if matches!(op, "bvumulo" | "bvsmulo") {
+                    2 * w
+                } else {
+                    w + 1
+                };
+                if wide > 64 {
+                    return self.fail("bit-vector width is unsupported (> 64)");
+                }
+                let n = wide - w;
+                let zx = |e: &Expr| Expr::BvZeroExt(n, Box::new(e.clone()));
+                let sx = |e: &Expr| Expr::BvSignExt(n, Box::new(e.clone()));
+                let (ba, bb) = (Box::new(a.clone()), Box::new(b.clone()));
+                let ne = |x: Expr, y: Expr| Expr::Not(Box::new(Expr::Eq(Box::new(x), Box::new(y))));
+                Some(match op {
+                    // carry out of the top bit
+                    "bvuaddo" => Expr::Eq(
+                        Box::new(Expr::BvExtract(
+                            w,
+                            w,
+                            Box::new(Expr::BvAdd(Box::new(zx(&a)), Box::new(zx(&b)))),
+                        )),
+                        Box::new(Expr::BvConst(1, 1)),
+                    ),
+                    "bvsaddo" => ne(
+                        Expr::BvAdd(Box::new(sx(&a)), Box::new(sx(&b))),
+                        sx(&Expr::BvAdd(ba, bb)),
+                    ),
+                    "bvusubo" => Expr::BvUlt(ba, bb),
+                    "bvssubo" => ne(
+                        Expr::BvSub(Box::new(sx(&a)), Box::new(sx(&b))),
+                        sx(&Expr::BvSub(ba, bb)),
+                    ),
+                    "bvumulo" => ne(
+                        Expr::BvExtract(
+                            2 * w - 1,
+                            w,
+                            Box::new(Expr::BvMul(Box::new(zx(&a)), Box::new(zx(&b)))),
+                        ),
+                        Expr::BvConst(0, w),
+                    ),
+                    "bvsmulo" => ne(
+                        Expr::BvMul(Box::new(sx(&a)), Box::new(sx(&b))),
+                        sx(&Expr::BvMul(ba, bb)),
+                    ),
+                    // signed division overflows only for MIN / -1
+                    _ => {
+                        let ones = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
+                        Expr::And(vec![
+                            Expr::Eq(ba, Box::new(Expr::BvConst(1u64 << (w - 1), w))),
+                            Expr::Eq(bb, Box::new(Expr::BvConst(ones, w))),
+                        ])
+                    }
+                })
+            }
+            "concat" => {
+                self.arity(op, &args, 1, None)?;
+                Self::fold_left(args, Expr::BvConcat)
+            }
             "bvnot" => {
                 self.arity(op, &args, 1, Some(1))?;
                 Some(Expr::BvNot(Box::new(args.into_iter().next()?)))
             }
             "bvshl" | "bvlshr" | "bvashr" | "bvule" | "bvult" | "bvsle" | "bvslt" | "bvuge"
-            | "bvugt" | "bvsge" | "bvsgt" | "concat" => {
+            | "bvugt" | "bvsge" | "bvsgt" => {
                 self.arity(op, &args, 2, Some(2))?;
                 let mut it = args.into_iter();
                 let (a, b) = (Box::new(it.next()?), Box::new(it.next()?));
@@ -1235,7 +1337,7 @@ impl<'a> Parser<'a> {
                     "bvugt" => Expr::BvUlt(b, a),
                     "bvsge" => Expr::BvSle(b, a),
                     "bvsgt" => Expr::BvSlt(b, a),
-                    _ => Expr::BvConcat(a, b),
+                    _ => unreachable!("bit-vector binary operator table is exhaustive"),
                 })
             }
             _ => {
