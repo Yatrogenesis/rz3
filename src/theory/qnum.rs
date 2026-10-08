@@ -315,6 +315,64 @@ mod tests {
         }
     }
 
+    fn big(n: i128, d: i128) -> Q {
+        Q::from_big(&BigRational::new(BigInt::from(n), BigInt::from(d)))
+    }
+
+    #[test]
+    fn gcd_matches_known_values() {
+        assert_eq!(gcd_u128(12, 18), 6);
+        assert_eq!(gcd_u128(17, 5), 1);
+        assert_eq!(gcd_u128(0, 9), 9);
+        assert_eq!(gcd_u128(9, 0), 9);
+        assert_eq!(gcd_u128(1 << 100, 1 << 70), 1 << 70);
+    }
+
+    #[test]
+    fn representation_is_small_exactly_when_it_fits() {
+        // reduced to the small form
+        assert!(matches!(from_i128(6, -4), Q::S(-3, 2)));
+        assert!(matches!(from_i128(i64::MAX as i128, 1), Q::S(_, 1)));
+        // numerator or denominator beyond i64: boxed form
+        assert!(matches!(from_i128(i64::MAX as i128 + 1, 1), Q::B(_)));
+        assert!(matches!(from_i128(1, i64::MAX as i128 + 1), Q::B(_)));
+        assert!(matches!(big(3, 4), Q::S(3, 4)));
+        assert!(matches!(big(i64::MAX as i128 + 1, 1), Q::B(_)));
+        assert!(matches!(big(1, i64::MAX as i128 + 1), Q::B(_)));
+    }
+
+    #[test]
+    fn sign_integrality_negation_and_abs_on_both_representations() {
+        let huge = i64::MAX as i128 + 1;
+        for (v, sign, int) in [
+            (q(0, 1), 0, true),
+            (q(5, 2), 1, false),
+            (q(-5, 2), -1, false),
+            (q(-4, 2), -1, true),
+            (big(huge, 1), 1, true),
+            (big(-huge, 1), -1, true),
+            (big(1, huge), 1, false),
+            (big(-1, huge), -1, false),
+            (big(0, huge), 0, true),
+        ] {
+            assert_eq!(v.signum(), sign);
+            assert_eq!(v.is_integer(), int);
+            assert_eq!(v.neg().to_big(), -v.to_big());
+            assert_eq!(v.abs().to_big(), num_traits::Signed::abs(&v.to_big()));
+        }
+        assert_eq!(q(i64::MIN, 1).neg().to_big(), -q(i64::MIN, 1).to_big());
+        assert_eq!(q(i64::MIN, 1).abs().signum(), 1);
+    }
+
+    #[test]
+    fn equality_is_value_equality_across_representations() {
+        assert!(q(1, 2) == q(2, 4));
+        assert!(q(1, 2) != q(1, 3));
+        assert!(q(1, 2) != q(-1, 2));
+        assert!(big(i64::MAX as i128 + 1, 1) == big(i64::MAX as i128 + 1, 1));
+        assert!(big(i64::MAX as i128 + 1, 1) != q(i64::MAX, 1));
+    }
+
     #[test]
     fn delta_order_is_lexicographic() {
         let a = D::new(q(1, 1), q(-1, 1));
