@@ -275,6 +275,8 @@ pub struct Parser<'a> {
     sorts: BTreeMap<String, Option<Type>>,
     funs: BTreeMap<String, usize>,
     macros: BTreeMap<String, Macro>,
+    /// Terms named with `(! t :named n)`; later uses of `n` denote `t`.
+    named: BTreeMap<String, Expr>,
     env: Vec<BTreeMap<String, Expr>>,
     injected: Vec<VecDeque<Token>>,
     recording: Option<Vec<Token>>,
@@ -294,6 +296,7 @@ impl<'a> Parser<'a> {
             sorts: BTreeMap::new(),
             funs: BTreeMap::new(),
             macros: BTreeMap::new(),
+            named: BTreeMap::new(),
             env: Vec::new(),
             injected: Vec::new(),
             recording: None,
@@ -745,6 +748,9 @@ impl<'a> Parser<'a> {
         if let Some(ty) = self.consts.get(&s) {
             return Some(Expr::Var(s, ty.clone()));
         }
+        if let Some(e) = self.named.get(&s) {
+            return Some(e.clone());
+        }
         if self.macros.get(&s).is_some_and(|m| m.params.is_empty()) {
             return self.expand_macro(&s, Vec::new());
         }
@@ -821,7 +827,26 @@ impl<'a> Parser<'a> {
                 "forall" | "exists" => self.parse_quantifier(op == "forall"),
                 "!" => {
                     let inner = self.parse_expr()?;
-                    self.skip_to_rparen()?;
+                    let mut depth = 1usize;
+                    let mut expect_name = false;
+                    while depth > 0 {
+                        match self.next_token() {
+                            Some(Token::LParen) => depth += 1,
+                            Some(Token::RParen) => depth -= 1,
+                            Some(Token::Keyword(a))
+                                if depth == 1 && (a == ":named" || a == "named") =>
+                            {
+                                expect_name = true;
+                                continue;
+                            }
+                            Some(Token::Symbol(n)) if depth == 1 && expect_name => {
+                                self.named.insert(n, inner.clone());
+                            }
+                            Some(_) => {}
+                            None => return self.fail("unexpected end of input"),
+                        }
+                        expect_name = false;
+                    }
                     Some(inner)
                 }
                 "_" => {

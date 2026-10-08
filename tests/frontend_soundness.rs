@@ -400,3 +400,20 @@ fn arrays_agree_with_the_standard() {
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn named_terms_are_usable_in_later_assertions_and_in_the_same_command() {
+    use Want::*;
+    // Truth values from Z3 (-smt2).
+    let cases: Vec<(&str, &str, Want)> = vec![
+        ("named assertion reused", "(assert (! (> a 3) :named t1))(assert (< a 2))(assert t1)", Unsat),
+        ("named negated", "(assert (! (> a 3) :named t1))(assert (not t1))(assert (> a 5))", Unsat),
+        ("named term reused as a term", "(assert (! (> (+ a 1) 3) :named t1))(assert (= b (+ (! a :named w) 0)))(assert (not (= w b)))", Unsat),
+        ("named subterm used in the same command", "(assert (= c (! (+ a 1) :named s1)))(assert (< (+ s1 0) c))", Unsat),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, body, want)| check(name, body, *want))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
