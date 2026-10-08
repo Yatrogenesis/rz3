@@ -27,6 +27,13 @@ fn fp_cases_agree_with_z3() {
             "(assert (fp.isSubnormal (fp #b0 #x00 #b00000000000000000000001)))",
             "sat",
         ),
+        ("(assert (= ((_ to_fp 8 24) RNE 0.1) ((_ to_fp 8 24) #x3dcccccd)))", "sat"),
+        ("(assert (= ((_ to_fp 8 24) RTZ 0.1) ((_ to_fp 8 24) #x3dcccccd)))", "unsat"),
+        ("(assert (= ((_ to_fp 8 24) RTP 0.1) ((_ to_fp 8 24) #x3dcccccd)))", "sat"),
+        ("(assert (= ((_ to_fp 8 24) RNE (- 1.5)) ((_ to_fp 8 24) #xbfc00000)))", "sat"),
+        ("(assert (fp.isNaN (fp.min (_ NaN 8 24) (_ +zero 8 24))))", "unsat"),
+        ("(assert (= (fp.max ((_ to_fp 8 24) RNE 2.0) ((_ to_fp 8 24) RNE 3.0)) ((_ to_fp 8 24) RNE 3.0)))", "sat"),
+        ("(assert (= (fp.min ((_ to_fp 8 24) RNE 2.0) ((_ to_fp 8 24) RNE 3.0)) ((_ to_fp 8 24) RNE 3.0)))", "unsat"),
         // undecidable for this evaluator: must not claim sat
         ("(declare-const x Float32)(assert (fp.isNaN x))", "unknown"),
     ];

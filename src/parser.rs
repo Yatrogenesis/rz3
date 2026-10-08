@@ -931,6 +931,11 @@ impl<'a> Parser<'a> {
                         let arg = args.into_iter().next()?;
                         Some(Expr::BvExtract(*h as usize, *l as usize, Box::new(arg)))
                     }
+                    ("to_fp", [e, sb], 1 | 2)
+                        if (2..=62).contains(e) && (2..=1023).contains(sb) =>
+                    {
+                        Some(Expr::App(format!("fp.to_fp.{e}.{sb}"), args))
+                    }
                     _ => self.fail(format!("unsupported indexed operator '{name}'")),
                 }
             }

@@ -811,6 +811,49 @@ impl FpSolver {
                         .unwrap_or(RoundingMode::NearestTiesToEven),
                 )
             }
+            Expr::App(name, args) if name.starts_with("fp.to_fp.") => {
+                let mut it = name["fp.to_fp.".len()..].split('.');
+                let e: u16 = it.next()?.parse().ok()?;
+                let sb: u16 = it.next()?.parse().ok()?;
+                let sort = FloatSort::new(e, sb)?;
+                match args.as_slice() {
+                    // Reinterpretation of an IEEE bit pattern; width must match exactly.
+                    [Expr::BvConst(v, w)] if *w == (e + sb) as usize => {
+                        FloatValue::from_bits(sort, &BigUint::from(*v))
+                    }
+                    // Exact real literal rounded under the given mode.
+                    [rm, real] => {
+                        let mode = self.rounding_mode(std::slice::from_ref(rm))?;
+                        let q = real.as_constant()?;
+                        let bits = round_signed_rational_to_bits(sort, &q, mode);
+                        FloatValue::from_bits(sort, &bits)
+                    }
+                    _ => None,
+                }
+            }
+            Expr::App(name, args) if name == "fp.min" || name == "fp.max" => {
+                let [a, b] = args.as_slice() else { return None };
+                let (a, b) = (self.eval_fp(a)?, self.eval_fp(b)?);
+                same_sort(&a, &b)?;
+                if matches!(a.class, FloatClass::QuietNaN { .. }) {
+                    return Some(b);
+                }
+                if matches!(b.class, FloatClass::QuietNaN { .. }) {
+                    return Some(a);
+                }
+                match self.fp_order(&a, &b)? {
+                    // +0 / -0 is unspecified in SMT-LIB: stay undecided.
+                    std::cmp::Ordering::Equal if !self.structural_eq(&a, &b) => None,
+                    o => {
+                        let a_smaller = o != std::cmp::Ordering::Greater;
+                        Some(if a_smaller == (name == "fp.min") {
+                            a
+                        } else {
+                            b
+                        })
+                    }
+                }
+            }
             Expr::App(name, args) if name == "fp.neg" => Some(self.eval_fp(args.first()?)?.neg()),
             Expr::App(name, args) if name == "fp.abs" => Some(self.eval_fp(args.first()?)?.abs()),
             _ => None,
