@@ -94,3 +94,18 @@ fn test_nla_square_is_not_negative() {
     solver.assert(&Expr::Lt(Box::new(xx), Box::new(Expr::Int(0))));
     assert!(matches!(solver.check(), SolverResult::Unsat));
 }
+
+#[test]
+fn test_nla_monotonicity_of_squares_refutes_equal_squares() {
+    // x > y > 0 and x*x = y*y is unsat (Z3 agrees); needs x > y >= 0 => x*x > y*y.
+    let mut solver = Rz3Solver::new();
+    let r = |n: &str| Expr::Var(n.to_string(), Type::Real);
+    let (x, y) = (r("x"), r("y"));
+    solver.assert(&Expr::Eq(
+        Box::new(Expr::Mul(vec![x.clone(), x.clone()])),
+        Box::new(Expr::Mul(vec![y.clone(), y.clone()])),
+    ));
+    solver.assert(&Expr::Gt(Box::new(x), Box::new(y.clone())));
+    solver.assert(&Expr::Gt(Box::new(y), Box::new(Expr::Int(0))));
+    assert!(matches!(solver.check(), SolverResult::Unsat));
+}

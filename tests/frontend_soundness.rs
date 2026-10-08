@@ -72,6 +72,13 @@ fn text_path_never_weakens_a_formula() {
         ("xor sat", "(assert (xor m n))(assert m)", Sat),
         // let / define-fun / declare-const used to be dropped or opaque
         ("let", "(assert (let ((y1 (+ a 1))) (and (> y1 5) (< y1 0))))", Unsat),
+        // div/mod by zero are unspecified (total, uninterpreted) in SMT-LIB: never force a value
+        // (found by typefuzz: `(mod 31415927 0)` was rewritten to the dividend and refuted a sat problem)
+        ("mod by constant zero is free", "(assert (>= (mod 5 0) 10))", SatOrDecline),
+        ("div by constant zero is free", "(assert (= (div a 0) 7))", SatOrDecline),
+        ("mod by variable zero is free", "(assert (and (= c 0) (>= (mod a c) 100)))", SatOrDecline),
+        ("mod nonzero range", "(assert (< (mod a 3) 0))", Unsat),
+        ("mod by zero is a function", "(assert (and (= (mod a 0) 1) (= (mod a 0) 2)))", Unsat),
         ("let shadowing", "(assert (let ((a 1)) (let ((a 2)) (= a 3))))", Unsat),
         ("define-fun constant", "(define-fun k () Int 5)(assert (> k 10))", Unsat),
         ("define-fun with parameter", "(define-fun dbl ((u Int)) Int (+ u u))(assert (= (dbl a) 7))", Unsat),

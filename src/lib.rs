@@ -572,10 +572,7 @@ impl Rz3Solver {
         let rebuilt = expr.map_children(&mut |c| self.eliminate_defs(c, lemmas));
         match &rebuilt {
             Expr::IntDiv(x, c) => self.division_variable(x, c, lemmas),
-            Expr::IntMod(x, c) => {
-                let q = self.division_variable(x, c, lemmas);
-                Expr::Sub(vec![(**x).clone(), Expr::Mul(vec![(**c).clone(), q])])
-            }
+            Expr::IntMod(x, c) => self.modulo_variable(x, c, lemmas),
             Expr::ToInt(x) => self.floor_variable(x, lemmas),
             Expr::IsInt(x) => {
                 let q = self.floor_variable(x, lemmas);
@@ -583,6 +580,36 @@ impl Rz3Solver {
             }
             _ => rebuilt,
         }
+    }
+
+    /// `mod x c` as its own variable. The identity `mod x c = x - c * div x c` only holds when
+    /// `c != 0`; for a zero divisor the standard leaves the value unspecified, so rewriting it
+    /// as `x - c * q` would force `mod x 0 = x` and could refute satisfiable problems.
+    fn modulo_variable(&mut self, x: &Expr, c: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        let key = Expr::IntMod(Box::new(x.clone()), Box::new(c.clone()));
+        if let Some(v) = self.def_vars.get(&key) {
+            return v.clone();
+        }
+        let q = self.division_variable(x, c, lemmas);
+        let r = Expr::Var(format!("__mod_{}", self.def_vars.len()), Type::Int);
+        let definition = Expr::Eq(
+            Box::new(r.clone()),
+            Box::new(Expr::Sub(vec![x.clone(), Expr::Mul(vec![c.clone(), q])])),
+        );
+        let nonzero_const = c
+            .as_constant()
+            .is_some_and(|v| v != num_rational::BigRational::from_integer(0.into()));
+        if nonzero_const {
+            lemmas.push(definition);
+        } else {
+            self.incomplete = true;
+            lemmas.push(Expr::Or(vec![
+                Expr::Eq(Box::new(c.clone()), Box::new(Expr::Int(0))),
+                definition,
+            ]));
+        }
+        self.def_vars.insert(key, r.clone());
+        r
     }
 
     fn division_variable(&mut self, x: &Expr, c: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
@@ -1734,6 +1761,64 @@ impl Rz3Solver {
         let le = |a: &Expr, b: &Expr| Expr::Le(Box::new(a.clone()), Box::new(b.clone()));
         let ge = |a: &Expr, b: &Expr| Expr::Ge(Box::new(a.clone()), Box::new(b.clone()));
         let imp = |p: Expr, q: Expr| Expr::Or(vec![Expr::Not(Box::new(p)), q]);
+        // Monotonicity between pairs of monomials (instantiated once per pair, only while some
+        // monomial is violated): for squares, x >= u >= 0 gives x*x >= u*u (and the mirror
+        // image for non-positive values); with a shared factor z, a >= b gives z*a >= z*b when
+        // z >= 0 and the reverse when z <= 0. All are valid in the reals.
+        let violated = monomials.iter().any(|mono| {
+            let m = Expr::Var(mono.name.clone(), Type::Real);
+            match (value(&mono.x), value(&mono.y), value(&m)) {
+                (Some(vx), Some(vy), Some(vm)) => vm != &vx * &vy,
+                _ => false,
+            }
+        });
+        if violated {
+            let mono_var = |mono: &crate::theory::linarith::Monomial| {
+                if mono.x.get_type() == Type::Int && mono.y.get_type() == Type::Int {
+                    Expr::Var(mono.name.clone(), Type::Int)
+                } else {
+                    Expr::Var(mono.name.clone(), Type::Real)
+                }
+            };
+            for (i, m1) in monomials.iter().enumerate() {
+                for m2 in monomials.iter().skip(i + 1).take(60) {
+                    let (e1, e2) = (mono_var(m1), mono_var(m2));
+                    let mut pair: Vec<Expr> = Vec::new();
+                    for (a, b, ea, eb) in [(m1, m2, &e1, &e2), (m2, m1, &e2, &e1)] {
+                        if a.x == a.y && b.x == b.y {
+                            let (x, u) = (&a.x, &b.x);
+                            pair.push(imp(Expr::And(vec![ge(x, u), ge(u, &zero)]), ge(ea, eb)));
+                            pair.push(imp(Expr::And(vec![gt(x, u), ge(u, &zero)]), gt(ea, eb)));
+                            pair.push(imp(Expr::And(vec![le(x, u), le(u, &zero)]), ge(ea, eb)));
+                            pair.push(imp(Expr::And(vec![lt(x, u), le(u, &zero)]), gt(ea, eb)));
+                        }
+                        for (za, fa) in [(&a.x, &a.y), (&a.y, &a.x)] {
+                            for (zb, fb) in [(&b.x, &b.y), (&b.y, &b.x)] {
+                                if za == zb && a.x != a.y && b.x != b.y {
+                                    pair.push(imp(
+                                        Expr::And(vec![ge(za, &zero), ge(fa, fb)]),
+                                        ge(ea, eb),
+                                    ));
+                                    pair.push(imp(
+                                        Expr::And(vec![le(za, &zero), ge(fa, fb)]),
+                                        le(ea, eb),
+                                    ));
+                                    pair.push(imp(
+                                        Expr::And(vec![gt(za, &zero), gt(fa, fb)]),
+                                        gt(ea, eb),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    for l in pair {
+                        if self.nl_done.insert(l.clone()) {
+                            out.push(l);
+                        }
+                    }
+                }
+            }
+        }
         for mono in monomials {
             let m = Expr::Var(mono.name.clone(), mono.x.get_type());
             let m = if mono.x.get_type() == Type::Int && mono.y.get_type() == Type::Int {
