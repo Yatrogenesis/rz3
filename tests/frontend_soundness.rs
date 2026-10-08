@@ -199,3 +199,92 @@ fn verdicts_are_deterministic() {
         assert_eq!(format!("{:?}", verdict(body)), first);
     }
 }
+
+const SORT_HEAD: &str = "(set-logic QF_UF)(declare-sort U 0)(declare-fun a () U)(declare-fun b () U)(declare-fun c () U)(declare-fun d () U)\
+(declare-fun f (U) U)(declare-fun g (U U) U)(declare-fun p (U) Bool)(declare-fun m () Bool)";
+
+#[test]
+fn uninterpreted_sorts_agree_with_the_standard() {
+    use Want::*;
+    let cases: &[(&str, &str, Want)] = &[
+        (
+            "transitivity",
+            "(assert (= a b))(assert (= b c))(assert (not (= a c)))",
+            Unsat,
+        ),
+        (
+            "congruence",
+            "(assert (= a b))(assert (not (= (f a) (f b))))",
+            Unsat,
+        ),
+        (
+            "nested congruence",
+            "(assert (= a b))(assert (not (= (f (f a)) (f (f b)))))",
+            Unsat,
+        ),
+        (
+            "binary congruence",
+            "(assert (= a b))(assert (= c d))(assert (not (= (g a c) (g b d))))",
+            Unsat,
+        ),
+        (
+            "no spurious congruence",
+            "(assert (not (= (f a) (f b))))",
+            Sat,
+        ),
+        (
+            "predicate congruence",
+            "(assert (= a b))(assert (p a))(assert (not (p b)))",
+            Unsat,
+        ),
+        ("predicate sat", "(assert (p a))(assert (not (p b)))", Sat),
+        (
+            "distinct",
+            "(assert (distinct a b c))(assert (= a c))",
+            Unsat,
+        ),
+        ("distinct sat", "(assert (distinct a b c d))", Sat),
+        (
+            "diamond chain",
+            "(assert (= a b))(assert (= b c))(assert (= c d))(assert (not (= (f a) (f d))))",
+            Unsat,
+        ),
+        (
+            "ite over sorts",
+            "(assert (= (ite m a b) c))(assert m)(assert (not (= a c)))",
+            Unsat,
+        ),
+        (
+            "ite sat",
+            "(assert (= (ite m a b) c))(assert (not m))(assert (not (= a c)))",
+            Sat,
+        ),
+        (
+            "propagation through congruence",
+            "(assert (= (f a) b))(assert (= a (f a)))(assert (not (= (f (f a)) b)))",
+            Unsat,
+        ),
+        (
+            "disjunction",
+            "(assert (or (= a b) (= a c)))(assert (not (= a b)))(assert (not (= a c)))",
+            Unsat,
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, body, want)| {
+            let script = format!("{SORT_HEAD}{body}(check-sat)");
+            let got = check_script(&script).map(|mut v| v.remove(0));
+            let ok = matches!(
+                (want, &got),
+                (Want::Sat, Ok(SolverResult::Sat)) | (Want::Unsat, Ok(SolverResult::Unsat))
+            );
+            if ok {
+                None
+            } else {
+                Some(format!("{name}: wanted {want:?}, got {got:?}"))
+            }
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

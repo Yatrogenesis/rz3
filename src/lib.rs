@@ -39,6 +39,7 @@ pub mod theory;
 use crate::ast::{Expr, ModelValue, Type};
 use crate::sat::CdclSolver;
 use crate::tactic::{Simplifier, SolveEqs, TacticEngine};
+use crate::theory::cc::Cc;
 use crate::theory::fp::FpSolver;
 use crate::theory::linarith::LinArith;
 use crate::theory::{
@@ -47,6 +48,36 @@ use crate::theory::{
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use std::collections::BTreeMap;
+
+/// The online theories (linear arithmetic and congruence closure) seen as one hook.
+struct Hooks<'a> {
+    lin: &'a mut LinArith,
+    cc: &'a mut Cc,
+}
+
+impl crate::sat::TheoryHook for Hooks<'_> {
+    fn new_level(&mut self) {
+        self.lin.new_level();
+        self.cc.new_level();
+    }
+
+    fn backtrack(&mut self, level: usize) {
+        self.lin.backtrack(level);
+        self.cc.backtrack(level);
+    }
+
+    fn assign(&mut self, lit: i32) -> Result<(), Vec<i32>> {
+        self.lin.assign(lit)?;
+        self.cc.assign(lit)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn check(&mut self) -> Result<Vec<(i32, Vec<i32>)>, Vec<i32>> {
+        let mut implied = self.lin.check()?;
+        implied.extend(self.cc.check()?);
+        Ok(implied)
+    }
+}
 
 /// Outcome of the generic (array / string / fp / quantifier / nonlinear / equality) theories.
 enum OtherTheories {
@@ -99,6 +130,7 @@ pub struct Rz3Solver {
     tactic_engine: TacticEngine,
 
     lin: LinArith,
+    cc: Cc,
     /// Comparison atoms with nonlinear content (decided or declined by the NLA theory).
     nla_atoms: Vec<(Expr, i32)>,
     /// Array / string / floating-point / quantifier content is present, so the generic
@@ -153,6 +185,7 @@ impl Rz3Solver {
             symbol_table: BTreeMap::new(),
             tactic_engine,
             lin: LinArith::new(),
+            cc: Cc::new(),
             nla_atoms: Vec::new(),
             slow: false,
             euf: EufSolver::new(),
@@ -217,6 +250,7 @@ impl Rz3Solver {
         te.add_tactic(Box::new(SolveEqs));
         self.tactic_engine = te;
         self.lin = LinArith::new();
+        self.cc = Cc::new();
         self.nla_atoms = Vec::new();
         self.slow = false;
         self.euf = EufSolver::new();
@@ -248,6 +282,14 @@ impl Rz3Solver {
     }
 
     fn assert_no_track_inner(&mut self, expr: &Expr) {
+        {
+            // New atoms are registered with the theories: they must be at the root first.
+            let mut hooks = Hooks {
+                lin: &mut self.lin,
+                cc: &mut self.cc,
+            };
+            self.sat_solver.unwind(&mut hooks);
+        }
         let typed = self.resolve_expr_types(expr);
         let mut def_lemmas = Vec::new();
         let typed = self.eliminate_defs(&typed, &mut def_lemmas);
@@ -448,6 +490,9 @@ impl Rz3Solver {
         }
         let rebuilt = expr.map_children(&mut |c| self.ackermannize(c, lemmas));
         if let Expr::App(name, args) = &rebuilt {
+            if self.is_native_function(name, args.len()) {
+                return rebuilt;
+            }
             if let Some(Type::Fn(params, ret)) = self.symbol_table.get(name).cloned() {
                 if params.len() == args.len() {
                     return self.application_variable(name, args, &ret, lemmas);
@@ -821,6 +866,8 @@ impl Rz3Solver {
                 if expr.has_nonlinear_arith() {
                     self.nla_atoms.push((expr.clone(), lit));
                 }
+            } else if self.is_cc_atom(expr) {
+                self.cc.register(lit, expr);
             } else if let Expr::Eq(a, _) = expr {
                 // Equalities over Boolean or bit-vector terms are fully encoded in the SAT
                 // core. Any other equality needs congruence closure.
@@ -832,6 +879,31 @@ impl Rz3Solver {
                 }
             }
             lit
+        }
+    }
+
+    /// Equality of uninterpreted-sort terms, or a predicate over such terms: both handled by
+    /// the congruence-closure theory.
+    fn is_cc_atom(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Eq(a, _) => matches!(self.infer_type(a), Some(Type::Sort(_))),
+            Expr::App(name, args) => self.is_native_function(name, args.len()),
+            _ => false,
+        }
+    }
+
+    /// A declared function the congruence closure treats natively: every argument has an
+    /// uninterpreted sort and the result is a sort or Boolean. (Everything else is
+    /// Ackermann-reduced so arithmetic and bit-vector arguments are compared exactly.)
+    fn is_native_function(&self, name: &str, arity: usize) -> bool {
+        match self.symbol_table.get(name) {
+            Some(Type::Fn(params, ret)) => {
+                params.len() == arity
+                    && !params.is_empty()
+                    && params.iter().all(|p| matches!(p, Type::Sort(_)))
+                    && matches!(**ret, Type::Sort(_) | Type::Bool)
+            }
+            _ => false,
         }
     }
 
@@ -1047,7 +1119,13 @@ impl Rz3Solver {
             }
             self.stats.dpll_iterations += 1;
             let sat_started = std::time::Instant::now();
-            let status = self.sat_solver.solve_with(&mut self.lin, self.deadline);
+            let status = {
+                let mut hooks = Hooks {
+                    lin: &mut self.lin,
+                    cc: &mut self.cc,
+                };
+                self.sat_solver.solve_with(&mut hooks, self.deadline)
+            };
             self.stats.sat_ns += sat_started.elapsed().as_nanos();
             self.stats.pivots = self.lin.pivots();
             self.stats.theory_conflicts = self.lin.conflicts;

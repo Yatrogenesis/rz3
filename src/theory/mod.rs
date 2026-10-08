@@ -1,5 +1,6 @@
 pub mod array;
 pub mod bv;
+pub mod cc;
 pub mod euf;
 pub mod fp;
 pub mod linarith;

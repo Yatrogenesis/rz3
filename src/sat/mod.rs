@@ -383,6 +383,16 @@ impl CdclSolver {
         Ok(())
     }
 
+    /// Unwind to decision level 0 and re-synchronise the theory. Needed before new atoms
+    /// are registered with the theory, so that it is not in the middle of a search.
+    pub fn unwind(&mut self, th: &mut dyn TheoryHook) {
+        if self.hook_dirty {
+            th.backtrack(0);
+            self.hook_dirty = false;
+        }
+        self.backtrack_with(0, th);
+    }
+
     /// Pure SAT solving (no theory).
     pub fn solve(&mut self) -> bool {
         self.solve_with(&mut NoTheory, None) == SolveStatus::Sat
