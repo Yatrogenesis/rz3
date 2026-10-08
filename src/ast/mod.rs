@@ -29,6 +29,13 @@ impl Expr {
             | Expr::StrLen(_) => Type::Int,
 
             Expr::Real(_, _) => Type::Real,
+            Expr::BigRat(_, den) => {
+                if den == "1" {
+                    Type::Int
+                } else {
+                    Type::Real
+                }
+            }
 
             Expr::Var(_, ty) => ty.clone(),
 
@@ -88,6 +95,40 @@ impl Expr {
         }
     }
 
+    /// Canonical constant for an exact rational: `Int` when it is an integer that fits
+    /// `i64`, otherwise `BigRat` (arbitrary precision in both directions).
+    pub fn from_rational(r: &num_rational::BigRational) -> Expr {
+        use num_traits::ToPrimitive;
+        if r.is_integer() {
+            if let Some(v) = r.numer().to_i64() {
+                return Expr::Int(v);
+            }
+        }
+        Expr::BigRat(r.numer().to_string(), r.denom().to_string())
+    }
+
+    /// Exact value of a numeric constant (`Int`, `Real`, `BigRat`), if this is one.
+    pub fn as_rational(&self) -> Option<num_rational::BigRational> {
+        use num_bigint::BigInt;
+        use std::str::FromStr;
+        match self {
+            Expr::Int(i) => Some(num_rational::BigRational::from_integer(BigInt::from(*i))),
+            Expr::Real(m, s) => Some(num_rational::BigRational::new(
+                BigInt::from(*m),
+                BigInt::from(10u8).pow(*s),
+            )),
+            Expr::BigRat(n, d) => {
+                let (n, d) = (BigInt::from_str(n).ok()?, BigInt::from_str(d).ok()?);
+                if num_traits::Zero::is_zero(&d) {
+                    None
+                } else {
+                    Some(num_rational::BigRational::new(n, d))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// True if `pred` holds for this node or any descendant.
     pub fn any_subterm(&self, pred: &dyn Fn(&Expr) -> bool) -> bool {
         if pred(self) {
@@ -107,7 +148,7 @@ impl Expr {
     pub fn has_nonlinear_arith(&self) -> bool {
         fn is_const(e: &Expr) -> bool {
             match e {
-                Expr::Int(_) | Expr::Real(_, _) => true,
+                Expr::Int(_) | Expr::Real(_, _) | Expr::BigRat(_, _) => true,
                 Expr::Add(v) | Expr::Mul(v) | Expr::Sub(v) => v.iter().all(is_const),
                 Expr::Div(a, b) => is_const(a) && is_const(b),
                 _ => false,
@@ -129,6 +170,7 @@ impl Expr {
             Expr::Bool(_)
             | Expr::Int(_)
             | Expr::Real(_, _)
+            | Expr::BigRat(_, _)
             | Expr::Var(_, _)
             | Expr::BvConst(_, _)
             | Expr::StrConst(_) => self.clone(),
@@ -256,6 +298,10 @@ pub enum Expr {
     Bool(bool),
     Int(i64),
     Real(i64, u32), // Integer part and decimal scale
+    /// Exact rational constant that does not fit `Int`/`Real`: canonical decimal
+    /// `numerator` (signed) and `denominator` (positive, coprime to the numerator).
+    /// Built with [`Expr::from_rational`]; read back with [`Expr::as_rational`].
+    BigRat(String, String),
     Var(String, Type),
     And(Vec<Expr>),
     Or(Vec<Expr>),

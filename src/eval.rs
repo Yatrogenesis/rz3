@@ -86,6 +86,7 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
         Expr::Bool(b) => Some(Value::Bool(*b)),
         Expr::Int(i) => Some(Value::Num(BigRational::from_integer(BigInt::from(*i)))),
         Expr::Real(m, s) => Some(Value::Num(decimal(*m, *s))),
+        Expr::BigRat(_, _) => expr.as_rational().map(Value::Num),
         Expr::BvConst(v, w) => Some(Value::Bv(*v & mask(*w), *w)),
         Expr::Var(name, ty) => match model.get(name) {
             Some(ModelValue::Bool(b)) => Some(Value::Bool(*b)),

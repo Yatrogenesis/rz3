@@ -1310,6 +1310,13 @@ impl LraSolver {
         match expr {
             Expr::Int(i) => scale * int_rat(*i),
             Expr::Real(i, s) => scale * decimal_rat(*i, *s),
+            Expr::BigRat(_, _) => match expr.as_rational() {
+                Some(r) => scale * r,
+                None => {
+                    self.abstracted = true;
+                    rat(0, 1)
+                }
+            },
             Expr::Var(name, ty) => {
                 let id = self.get_or_create_var(name);
                 if *ty == Type::Int {
@@ -1386,6 +1393,7 @@ impl LraSolver {
         match expr {
             Expr::Int(i) => Some(int_rat(*i)),
             Expr::Real(i, s) => Some(decimal_rat(*i, *s)),
+            Expr::BigRat(_, _) => expr.as_rational(),
             Expr::Add(args) => args
                 .iter()
                 .try_fold(rat(0, 1), |acc, a| Some(acc + self.try_eval_const(a)?)),

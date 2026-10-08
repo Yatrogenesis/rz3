@@ -238,6 +238,15 @@ impl NlaSolver {
                 p.terms.insert(vec![], BigInt::from(*i));
                 Some(p)
             }
+            Expr::BigRat(_, _) => {
+                let r = expr.as_rational()?;
+                if !r.is_integer() {
+                    return None;
+                }
+                let mut p = MultivariatePolynomial::new();
+                p.terms.insert(vec![], r.to_integer());
+                Some(p)
+            }
             Expr::Var(name, _) => {
                 let idx = self.get_var_idx(name);
                 let mut p = MultivariatePolynomial::new();

@@ -8,7 +8,19 @@ use rz3::SolverResult;
 use std::env;
 use std::fs;
 
+/// Real benchmarks nest terms thousands of levels deep and every pass over them is
+/// recursive, so the work runs on a thread with a large stack instead of the 8 MiB main one.
 fn main() {
+    let worker = std::thread::Builder::new()
+        .stack_size(2 << 30)
+        .spawn(real_main)
+        .expect("failed to start the solver thread");
+    if worker.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn real_main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("Usage: rz3 <file.smt2>");

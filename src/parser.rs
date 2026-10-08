@@ -16,6 +16,9 @@ pub enum Token {
     Keyword(String),
     Int(i64),
     Real(i64, u32),
+    /// Numeral or decimal that does not fit the machine representations: exact digits
+    /// (`123..` or `12.5..`), converted to a rational by the parser.
+    BigNum(String),
     BitVec(u64, usize),
     String(String),
 }
@@ -171,18 +174,25 @@ impl<'a> Lexer<'a> {
                 if s.contains('.') {
                     match parse_decimal_token(&s) {
                         Some((mantissa, scale)) => Some(Token::Real(mantissa, scale)),
+                        // Too many digits for i64: keep them exactly instead of rejecting.
+                        None if s.trim_start_matches('-').split_once('.').is_some_and(
+                            |(w, f)| {
+                                (!w.is_empty() || !f.is_empty())
+                                    && w.chars().chain(f.chars()).all(|c| c.is_ascii_digit())
+                            },
+                        ) =>
+                        {
+                            Some(Token::BigNum(s))
+                        }
                         None => {
-                            self.fail(format!("malformed or out-of-range decimal '{s}'"));
+                            self.fail(format!("malformed decimal '{s}'"));
                             None
                         }
                     }
                 } else {
                     match s.parse() {
                         Ok(v) => Some(Token::Int(v)),
-                        Err(_) => {
-                            self.fail(format!("numeral '{s}' does not fit in 64 bits"));
-                            None
-                        }
+                        Err(_) => Some(Token::BigNum(s)),
                     }
                 }
             }
@@ -428,6 +438,7 @@ impl<'a> Parser<'a> {
             Some(Token::Symbol(s)) => s,
             Some(Token::Int(i)) => i.to_string(),
             Some(Token::Real(i, s)) => format_real_token(i, s),
+            Some(Token::BigNum(t)) => t,
             Some(Token::BitVec(v, w)) => format!("#b{:0width$b}", v, width = w),
             Some(Token::String(s)) => s,
             _ => return self.fail("unsupported attribute value"),
@@ -714,6 +725,10 @@ impl<'a> Parser<'a> {
             Some(Token::Int(i)) => Some(Expr::Int(i)),
             Some(Token::BitVec(value, width)) => Some(Expr::BvConst(value, width)),
             Some(Token::Real(i, s)) => Some(Expr::Real(i, s)),
+            Some(Token::BigNum(text)) => match big_number(&text) {
+                Some(r) => Some(Expr::from_rational(&r)),
+                None => self.fail(format!("malformed numeral '{text}'")),
+            },
             Some(Token::Symbol(s)) => self.parse_symbol(s),
             Some(Token::LParen) => self.parse_list(),
             Some(Token::String(_)) => self.fail("string literals are unsupported"),
@@ -1055,6 +1070,25 @@ fn first_expression(tokens: &[Token]) -> Vec<Token> {
 
 fn is_symbol_char(c: char) -> bool {
     c.is_alphabetic() || "~!@$%^&*_-+=<>.?/".contains(c)
+}
+
+/// Exact value of an arbitrarily long numeral or decimal (`-123`, `0.000...01`).
+fn big_number(text: &str) -> Option<num_rational::BigRational> {
+    use num_bigint::BigInt;
+    use std::str::FromStr;
+    let negative = text.starts_with('-');
+    let body = text.trim_start_matches('-');
+    let (whole, frac) = body.split_once('.').unwrap_or((body, ""));
+    let digits = format!("{}{}", if whole.is_empty() { "0" } else { whole }, frac);
+    let mut numer = BigInt::from_str(&digits).ok()?;
+    if negative {
+        numer = -numer;
+    }
+    let scale = u32::try_from(frac.len()).ok()?;
+    Some(num_rational::BigRational::new(
+        numer,
+        BigInt::from(10u8).pow(scale),
+    ))
 }
 
 fn parse_decimal_token(s: &str) -> Option<(i64, u32)> {
