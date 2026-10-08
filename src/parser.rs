@@ -865,6 +865,11 @@ impl<'a> Parser<'a> {
                                 continue;
                             }
                             Some(Token::Symbol(n)) if depth == 1 && expect_name => {
+                                // A named term under a binder may mention bound variables, which
+                                // a later use outside the binder would capture (SMT-LIB forbids it).
+                                if self.quant_depth > 0 {
+                                    return self.fail("':named' is not allowed under a quantifier");
+                                }
                                 self.named.insert(n, inner.clone());
                             }
                             Some(_) => {}
@@ -1315,6 +1320,9 @@ impl<'a> Parser<'a> {
                 self.arity(op, &args, 3, Some(3))?;
                 let mut it = args.into_iter();
                 let (c, a, b) = (it.next()?, it.next()?, it.next()?);
+                if c.get_type() != Type::BitVec(1) || a.get_type() != b.get_type() {
+                    return self.fail("'bvite' needs a 1-bit condition and branches of one width");
+                }
                 Some(Expr::Ite(
                     Box::new(Expr::Eq(Box::new(c), Box::new(Expr::BvConst(1, 1)))),
                     Box::new(a),
@@ -1352,6 +1360,9 @@ impl<'a> Parser<'a> {
                 let Type::BitVec(w) = a.get_type() else {
                     return self.fail(format!("'{op}' expects bit-vectors"));
                 };
+                if b.get_type() != Type::BitVec(w) {
+                    return self.fail(format!("'{op}' expects operands of one width"));
+                }
                 let wide = if matches!(op, "bvumulo" | "bvsmulo") {
                     2 * w
                 } else {

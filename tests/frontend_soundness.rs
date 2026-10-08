@@ -107,6 +107,10 @@ fn text_path_never_weakens_a_formula() {
         ("nested lets share", "(assert (let ((u (+ a a a a a a a a a a a a a a a a a a a a a a a a a a))) (let ((w (+ u u u u u u u u u u u u u u u u u u u u u u u u u u u u))) (and (> w 5) (< u 0) (> a 0)))))", Unsat),
         ("nested lets sat", "(assert (let ((u (+ a a a a a a a a a a a a a a a a a a a a a a a a a a))) (let ((w (+ u u u u u u u u u u u u u u u u u u u u u u u u u u u u))) (and (> w 5) (> a 0)))))", Sat),
         ("let of uf application", "(assert (let ((u (f (+ a a a a a a a a a a a a a a a a a a a a a a a a a a)))) (and (> u 3) (< u 2))))", Unsat),
+        // ill-typed or ill-placed input is rejected, as Z3 and cvc5 do (agy audit)
+        ("bvite width mismatch", "(assert (= (bvite #b1 #b0011 #b01010101) #b0011))", Error),
+        ("bvuaddo width mismatch", "(assert (bvuaddo #b0011 #b01010101))", Error),
+        ("named under quantifier", "(assert (forall ((z Int)) (! (> z 0) :named nq)))", Error),
         ("mod nonzero range", "(assert (< (mod a 3) 0))", Unsat),
         ("mod by zero is a function", "(assert (and (= (mod a 0) 1) (= (mod a 0) 2)))", Unsat),
         ("let shadowing", "(assert (let ((a 1)) (let ((a 2)) (= a 3))))", Unsat),
