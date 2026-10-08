@@ -426,3 +426,109 @@ impl TheoryHook for Cc {
         Ok(Vec::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn var(n: &str) -> Expr {
+        Expr::Var(n.to_string(), Type::Sort("S".to_string()))
+    }
+    fn f(e: Expr) -> Expr {
+        Expr::App("f".to_string(), vec![e])
+    }
+    fn eq(a: Expr, b: Expr) -> Expr {
+        Expr::Eq(Box::new(a), Box::new(b))
+    }
+
+    /// Atoms: 1: a=b, 2: b=c, 3: a=c, 4: f(a)=f(c), 5: f(a)=f(b).
+    fn setup() -> Cc {
+        let mut cc = Cc::new();
+        assert!(cc.is_empty());
+        let (a, b, c) = (var("a"), var("b"), var("c"));
+        assert!(cc.register(1, &eq(a.clone(), b.clone())));
+        assert!(cc.register(2, &eq(b.clone(), c.clone())));
+        assert!(cc.register(3, &eq(a.clone(), c.clone())));
+        assert!(cc.register(4, &eq(f(a.clone()), f(c))));
+        assert!(cc.register(5, &eq(f(a), f(b))));
+        assert!(!cc.is_empty());
+        cc
+    }
+
+    #[test]
+    fn handles_only_uninterpreted_sorts() {
+        assert!(Cc::handles_type(&Type::Sort("S".to_string())));
+        assert!(!Cc::handles_type(&Type::Int));
+        assert!(!Cc::handles_type(&Type::Bool));
+    }
+
+    #[test]
+    fn transitivity_conflict_is_explained_exactly() {
+        let mut cc = setup();
+        cc.assign(1).unwrap();
+        cc.assign(2).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+        let clause = cc.assign(-3).unwrap_err();
+        assert_eq!(clause, vec![-2, -1, 3]);
+    }
+
+    #[test]
+    fn disequality_asserted_first_conflicts_when_the_classes_merge() {
+        let mut cc = setup();
+        cc.assign(-3).unwrap();
+        cc.assign(1).unwrap();
+        cc.assign(2).unwrap();
+        assert_eq!(cc.check().unwrap_err(), vec![-2, -1, 3]);
+    }
+
+    #[test]
+    fn congruence_conflict_is_explained_by_the_argument_equalities() {
+        let mut cc = setup();
+        cc.assign(1).unwrap();
+        cc.assign(2).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+        assert_eq!(cc.assign(-4).unwrap_err(), vec![-2, -1, 4]);
+    }
+
+    #[test]
+    fn congruence_propagates_through_a_merge_and_conflicts_in_check() {
+        let mut cc = setup();
+        cc.assign(-5).unwrap();
+        cc.assign(1).unwrap();
+        assert_eq!(cc.check().unwrap_err(), vec![-1, 5]);
+    }
+
+    #[test]
+    fn backtracking_undoes_merges_but_keeps_earlier_levels() {
+        let mut cc = setup();
+        cc.new_level();
+        cc.assign(1).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+        cc.new_level();
+        cc.assign(2).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+        cc.backtrack(1);
+        // b = c is gone: a != c is consistent again ...
+        cc.assign(-3).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+        // ... but a = b still holds, so f(a) != f(b) conflicts.
+        assert_eq!(cc.assign(-5).unwrap_err(), vec![-1, 5]);
+        cc.backtrack(0);
+        // everything undone: f(a) != f(b) is now fine.
+        cc.assign(-5).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_conflict_does_not_survive_backtracking() {
+        let mut cc = setup();
+        cc.new_level();
+        cc.assign(-5).unwrap();
+        cc.assign(1).unwrap();
+        assert!(cc.check().is_err());
+        cc.backtrack(0);
+        assert!(cc.check().unwrap().is_empty());
+        cc.assign(1).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+    }
+}
