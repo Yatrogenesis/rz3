@@ -41,6 +41,11 @@ pub struct ArrayReducer {
     sels_by_array: BTreeMap<Expr, Vec<(Expr, Expr)>>,
     eq_atoms: BTreeMap<(Expr, Expr), Expr>,
     indices: BTreeMap<Type, Vec<Expr>>,
+    /// Per infinite index sort: a fresh index constrained to differ from every other index
+    /// term. Instantiating the axioms there captures the "default" behaviour of an array
+    /// outside its finitely many explicit indices (needed for constant arrays and
+    /// equalities between stores).
+    fresh_index: BTreeMap<Type, Expr>,
     sources: Vec<Source>,
     lemma_count: usize,
     /// Instantiation lemmas that are only added when the current model violates them.
@@ -149,12 +154,42 @@ impl ArrayReducer {
         }
     }
 
+    /// An index sort with room for an index distinct from any finite set of terms.
+    /// Bit-vector widths below 20 are treated as finite: the fresh-index argument does not
+    /// hold there, so satisfiable verdicts are withheld.
+    fn infinite(ty: &Type) -> Option<bool> {
+        match ty {
+            Type::Int | Type::Real | Type::Sort(_) => Some(true),
+            Type::BitVec(w) => Some(*w >= 20),
+            _ => None,
+        }
+    }
+
     fn add_index(&mut self, ty: &Type, idx: &Expr, lemmas: &mut Vec<Expr>) {
-        let list = self.indices.entry(ty.clone()).or_default();
-        if list.contains(idx) {
+        if self.indices.get(ty).is_some_and(|l| l.contains(idx)) {
             return;
         }
-        list.push(idx.clone());
+        if !self.fresh_index.contains_key(ty) {
+            match Self::infinite(ty) {
+                Some(true) => {
+                    let d = Expr::Var(self.name("default"), ty.clone());
+                    self.fresh_index.insert(ty.clone(), d.clone());
+                    self.indices.entry(ty.clone()).or_default().push(d.clone());
+                    for s in 0..self.sources.len() {
+                        self.instantiate(s, &d, lemmas);
+                    }
+                }
+                _ => self.truncated = true,
+            }
+        }
+        // The fresh index differs from every explicit index term.
+        if let Some(d) = self.fresh_index.get(ty).cloned() {
+            self.defer(not(eq(&d, idx)));
+        }
+        self.indices
+            .entry(ty.clone())
+            .or_default()
+            .push(idx.clone());
         // Instantiate every source of axioms at the new index.
         for s in 0..self.sources.len() {
             self.instantiate(s, idx, lemmas);

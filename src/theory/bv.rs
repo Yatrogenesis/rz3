@@ -201,6 +201,78 @@ impl<'a> BitBlaster<'a> {
             .collect()
     }
 
+    fn negate(&mut self, x: &[i32]) -> Vec<i32> {
+        let not_x: Vec<i32> = x.iter().map(|&l| -l).collect();
+        let zeros: Vec<i32> = (0..x.len()).map(|_| self.constant(false)).collect();
+        let one = self.constant(true);
+        self.adder(&not_x, &zeros, one)
+    }
+
+    /// `sel ? a : b`, bit by bit.
+    fn mux_vec(&mut self, sel: i32, a: &[i32], b: &[i32]) -> Vec<i32> {
+        a.iter()
+            .zip(b)
+            .map(|(&p, &q)| self.mux(sel, p, q))
+            .collect()
+    }
+
+    /// Product truncated to the operand width (shift-and-add).
+    fn multiply(&mut self, x: &[i32], y: &[i32]) -> Vec<i32> {
+        let w = x.len();
+        let zero = self.constant(false);
+        let mut acc = vec![zero; w];
+        for (i, &yi) in y.iter().enumerate() {
+            let partial: Vec<i32> = (0..w)
+                .map(|j| {
+                    if j >= i {
+                        self.and2(x[j - i], yi)
+                    } else {
+                        zero
+                    }
+                })
+                .collect();
+            let cin = self.constant(false);
+            acc = self.adder(&acc, &partial, cin);
+        }
+        acc
+    }
+
+    /// Unsigned quotient and remainder with the SMT-LIB conventions for a zero divisor
+    /// (`x / 0 = all ones`, `x % 0 = x`): fresh `q`, `r` constrained by
+    /// `y != 0 -> (x = q*y + r over 2w bits /\ r < y)` and `y = 0 -> (q = ones /\ r = x)`.
+    fn udivrem(&mut self, x: &[i32], y: &[i32]) -> (Vec<i32>, Vec<i32>) {
+        let w = x.len();
+        let q: Vec<i32> = (0..w).map(|_| self.new_var()).collect();
+        let r: Vec<i32> = (0..w).map(|_| self.new_var()).collect();
+        let mut nz = self.constant(false);
+        for &b in y {
+            nz = self.or2(nz, b);
+        }
+        for i in 0..w {
+            self.clause(vec![nz, q[i]]);
+            self.clause(vec![nz, -r[i], x[i]]);
+            self.clause(vec![nz, r[i], -x[i]]);
+        }
+        let zero = self.constant(false);
+        let widen = |v: &[i32]| -> Vec<i32> {
+            v.iter()
+                .copied()
+                .chain(std::iter::repeat(zero).take(w))
+                .collect()
+        };
+        let (qe, ye, re, xe) = (widen(&q), widen(y), widen(&r), widen(x));
+        let prod = self.multiply(&qe, &ye);
+        let cin = self.constant(false);
+        let sum = self.adder(&prod, &re, cin);
+        for i in 0..2 * w {
+            self.clause(vec![-nz, -sum[i], xe[i]]);
+            self.clause(vec![-nz, sum[i], -xe[i]]);
+        }
+        let lt = self.ult(&r, y);
+        self.clause(vec![-nz, lt]);
+        (q, r)
+    }
+
     pub fn bit_blast(&mut self, expr: &Expr) -> Vec<i32> {
         if let Some(bits) = self.expr_to_bits.get(expr) {
             return bits.clone();
@@ -286,24 +358,114 @@ impl<'a> BitBlaster<'a> {
                 if !self.same_width(&x, &y) {
                     return vec![];
                 }
-                let w = x.len();
-                let zero = self.constant(false);
-                let mut acc = vec![zero; w];
-                for (i, &yi) in y.iter().enumerate() {
-                    // (x << i) masked by y[i], truncated to w bits.
-                    let partial: Vec<i32> = (0..w)
-                        .map(|j| {
-                            if j >= i {
-                                self.and2(x[j - i], yi)
-                            } else {
-                                zero
-                            }
-                        })
-                        .collect();
-                    let cin = self.constant(false);
-                    acc = self.adder(&acc, &partial, cin);
+                self.multiply(&x, &y)
+            }
+            Expr::BvNeg(a) => {
+                let x = self.bit_blast(a);
+                if x.is_empty() {
+                    return vec![];
                 }
-                acc
+                self.negate(&x)
+            }
+            Expr::BvZeroExt(n, a) => {
+                let mut x = self.bit_blast(a);
+                if x.is_empty() || x.len() + n > MAX_BV_WIDTH {
+                    self.unsupported = true;
+                    return vec![];
+                }
+                for _ in 0..*n {
+                    let zero = self.constant(false);
+                    x.push(zero);
+                }
+                x
+            }
+            Expr::BvSignExt(n, a) => {
+                let mut x = self.bit_blast(a);
+                if x.is_empty() || x.len() + n > MAX_BV_WIDTH {
+                    self.unsupported = true;
+                    return vec![];
+                }
+                let sign = x[x.len() - 1];
+                x.extend(std::iter::repeat(sign).take(*n));
+                x
+            }
+            Expr::BvRotl(n, a) | Expr::BvRotr(n, a) => {
+                let x = self.bit_blast(a);
+                if x.is_empty() {
+                    return vec![];
+                }
+                let w = x.len();
+                let k = n % w;
+                (0..w)
+                    .map(|i| {
+                        if matches!(expr, Expr::BvRotl(_, _)) {
+                            x[(i + w - k) % w]
+                        } else {
+                            x[(i + k) % w]
+                        }
+                    })
+                    .collect()
+            }
+            Expr::BvRepeat(n, a) => {
+                let x = self.bit_blast(a);
+                if x.is_empty() || *n == 0 || x.len() * n > MAX_BV_WIDTH {
+                    self.unsupported = true;
+                    return vec![];
+                }
+                (0..*n).flat_map(|_| x.clone()).collect()
+            }
+            Expr::BvUdiv(a, b) | Expr::BvUrem(a, b) => {
+                let (x, y) = (self.bit_blast(a), self.bit_blast(b));
+                if !self.same_width(&x, &y) {
+                    return vec![];
+                }
+                let (q, r) = self.udivrem(&x, &y);
+                if matches!(expr, Expr::BvUdiv(_, _)) {
+                    q
+                } else {
+                    r
+                }
+            }
+            Expr::BvSdiv(a, b) | Expr::BvSrem(a, b) | Expr::BvSmod(a, b) => {
+                let (x, y) = (self.bit_blast(a), self.bit_blast(b));
+                if !self.same_width(&x, &y) {
+                    return vec![];
+                }
+                let w = x.len();
+                let (sx, sy) = (x[w - 1], y[w - 1]);
+                let neg_x = self.negate(&x);
+                let neg_y = self.negate(&y);
+                let abs_x = self.mux_vec(sx, &neg_x, &x);
+                let abs_y = self.mux_vec(sy, &neg_y, &y);
+                let (q, r) = self.udivrem(&abs_x, &abs_y);
+                match expr {
+                    Expr::BvSdiv(_, _) => {
+                        let flip = self.xor2(sx, sy);
+                        let neg_q = self.negate(&q);
+                        self.mux_vec(flip, &neg_q, &q)
+                    }
+                    Expr::BvSrem(_, _) => {
+                        let neg_r = self.negate(&r);
+                        self.mux_vec(sx, &neg_r, &r)
+                    }
+                    _ => {
+                        // bvsmod: the result takes the sign of the divisor.
+                        let mut nonzero = self.constant(false);
+                        for &bit in &r {
+                            nonzero = self.or2(nonzero, bit);
+                        }
+                        let neg_r = self.negate(&r);
+                        let zero_c = self.constant(false);
+                        let cin = zero_c;
+                        let neg_r_plus_t = self.adder(&neg_r, &y, cin);
+                        let r_plus_t = self.adder(&r, &y, cin);
+                        // s>=0,t>=0: r ; s<0,t>=0: -r+t ; s>=0,t<0: r+t ; s<0,t<0: -r
+                        let when_t_pos = self.mux_vec(sx, &neg_r_plus_t, &r);
+                        let when_t_neg = self.mux_vec(sx, &neg_r, &r_plus_t);
+                        let nonzero_result = self.mux_vec(sy, &when_t_neg, &when_t_pos);
+                        self.mux_vec(nonzero, &nonzero_result, &r)
+                    }
+                }
             }
             Expr::BvShl(a, b) | Expr::BvLshr(a, b) | Expr::BvAshr(a, b) => {
                 let (x, y) = (self.bit_blast(a), self.bit_blast(b));

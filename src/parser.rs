@@ -847,6 +847,26 @@ impl<'a> Parser<'a> {
                 }
                 let args = self.parse_args()?;
                 match (name.as_str(), indices.as_slice(), args.len()) {
+                    ("rotate_left" | "rotate_right", [n], 1) if *n >= 0 => {
+                        // The amount is taken modulo the width, so any non-negative value is fine.
+                        let x = Box::new(args.into_iter().next()?);
+                        Some(if name == "rotate_left" {
+                            Expr::BvRotl(*n as usize, x)
+                        } else {
+                            Expr::BvRotr(*n as usize, x)
+                        })
+                    }
+                    ("zero_extend" | "sign_extend" | "repeat", [n], 1)
+                        if *n >= 0 && *n <= MAX_PARSED_BV_WIDTH as i64 =>
+                    {
+                        let n = *n as usize;
+                        let x = Box::new(args.into_iter().next()?);
+                        Some(match name.as_str() {
+                            "zero_extend" => Expr::BvZeroExt(n, x),
+                            "sign_extend" => Expr::BvSignExt(n, x),
+                            _ => Expr::BvRepeat(n, x),
+                        })
+                    }
                     ("extract", [h, l], 1)
                         if *l >= 0 && h >= l && *h < MAX_PARSED_BV_WIDTH as i64 =>
                     {
@@ -1105,6 +1125,31 @@ impl<'a> Parser<'a> {
             "bvxor" => {
                 self.arity(op, &args, 2, None)?;
                 Self::fold_left(args, Expr::BvXor)
+            }
+            "bvneg" => {
+                self.arity(op, &args, 1, Some(1))?;
+                Some(Expr::BvNeg(Box::new(args.into_iter().next()?)))
+            }
+            "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem" | "bvsmod" | "bvnand" | "bvnor"
+            | "bvxnor" | "bvcomp" => {
+                self.arity(op, &args, 2, Some(2))?;
+                let mut it = args.into_iter();
+                let (a, b) = (Box::new(it.next()?), Box::new(it.next()?));
+                Some(match op {
+                    "bvudiv" => Expr::BvUdiv(a, b),
+                    "bvurem" => Expr::BvUrem(a, b),
+                    "bvsdiv" => Expr::BvSdiv(a, b),
+                    "bvsrem" => Expr::BvSrem(a, b),
+                    "bvsmod" => Expr::BvSmod(a, b),
+                    "bvnand" => Expr::BvNot(Box::new(Expr::BvAnd(a, b))),
+                    "bvnor" => Expr::BvNot(Box::new(Expr::BvOr(a, b))),
+                    "bvxnor" => Expr::BvNot(Box::new(Expr::BvXor(a, b))),
+                    _ => Expr::Ite(
+                        Box::new(Expr::Eq(a, b)),
+                        Box::new(Expr::BvConst(1, 1)),
+                        Box::new(Expr::BvConst(0, 1)),
+                    ),
+                })
             }
             "bvnot" => {
                 self.arity(op, &args, 1, Some(1))?;

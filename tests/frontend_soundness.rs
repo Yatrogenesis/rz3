@@ -139,6 +139,25 @@ fn text_path_never_weakens_a_formula() {
         ("to_int sat", "(assert (= (to_int x) 2))(assert (= x 2.5))", Sat),
         ("is_int", "(assert (is_int x))(assert (> x 0.2))(assert (< x 0.8))", Unsat),
         ("to_real", "(assert (> (to_real a) 2.5))(assert (< a 3))", Unsat),
+        // numeric typing of arithmetic inside ite
+        ("ite with real branches", "(assert (>= 2.7 (+ (ite false (+ (- 2.0) x) (+ (- 4.0) 5.9)) 0.8)))", Sat),
+        ("ite real then int", "(assert (= (ite m 1 2.5) 2.5))(assert m)", Unsat),
+        // bit-vector operators added after the pilot
+        ("bvneg", "(assert (= p #x05))(assert (not (= (bvneg p) #xfb)))", Unsat),
+        ("bvudiv", "(assert (= p #x64))(assert (not (= (bvudiv p #x07) #x0e)))", Unsat),
+        ("bvudiv by zero", "(assert (not (= (bvudiv p #x00) #xff)))", Unsat),
+        ("bvurem by zero", "(assert (= p #x2a))(assert (not (= (bvurem p #x00) #x2a)))", Unsat),
+        ("bvsdiv", "(assert (= p #xf6))(assert (not (= (bvsdiv p #x03) #xfd)))", Unsat),
+        ("bvsrem", "(assert (= p #xf6))(assert (not (= (bvsrem p #x03) #xff)))", Unsat),
+        ("bvsmod", "(assert (= p #xf6))(assert (not (= (bvsmod p #x03) #x02)))", Unsat),
+        ("zero_extend", "(assert (= p #xff))(assert (not (= ((_ extract 11 8) ((_ zero_extend 4) p)) #x0)))", Unsat),
+        ("sign_extend", "(assert (= p #xff))(assert (not (= ((_ extract 11 8) ((_ sign_extend 4) p)) #xf)))", Unsat),
+        ("rotate_left", "(assert (= p #x81))(assert (not (= ((_ rotate_left 1) p) #x03)))", Unsat),
+        ("rotate_right", "(assert (= p #x81))(assert (not (= ((_ rotate_right 1) p) #xc0)))", Unsat),
+        ("rotate beyond width", "(assert (= p #x81))(assert (not (= ((_ rotate_left 9) p) #x03)))", Unsat),
+        ("repeat", "(assert (= p #xa5))(assert (not (= ((_ extract 15 8) ((_ repeat 2) p)) #xa5)))", Unsat),
+        ("bvnand", "(assert (= p #xf0))(assert (not (= (bvnand p #x3c) #xcf)))", Unsat),
+        ("bvcomp", "(assert (= p q))(assert (not (= (bvcomp p q) #b1)))", Unsat),
         // front end must reject, not guess
         ("error inside the last command", "(assert (> a 0))(check-sat ')", Error),
         ("undeclared symbol", "(assert (> zz 1))", Error),
@@ -311,6 +330,7 @@ fn arrays_agree_with_the_standard() {
         ("swap", "(assert (= B (store (store A i (select A j)) j (select A i))))(assert (not (= (select B i) (select A j))))", Unsat),
         ("swap sat", "(assert (= B (store (store A i (select A j)) j (select A i))))(assert (= (select B j) (select A i)))", Sat),
         ("arrays differ", "(assert (not (= A B)))(assert (= A C))(assert (= B C))", Unsat),
+        ("constant arrays disagree on the default", "(assert (= ((as const (Array Int Int)) 2) (store (store C (+ i 2) 1) (+ i 1) 2)))(assert (= (store C (+ i 1) 2) (store ((as const (Array Int Int)) 1) (- j 1) 2)))", Unsat),
         ("integer index arithmetic", "(assert (= (select A (+ i 1)) 4))(assert (= j (+ i 1)))(assert (not (= (select A j) 4)))", Unsat),
     ];
     let failures: Vec<String> = cases

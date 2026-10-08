@@ -23,14 +23,20 @@ impl Expr {
             | Expr::Exists(_, _) => Type::Bool,
 
             Expr::Int(_)
-            | Expr::Add(_)
-            | Expr::Sub(_)
-            | Expr::Mul(_)
-            | Expr::Div(_, _)
             | Expr::IntDiv(_, _)
             | Expr::IntMod(_, _)
             | Expr::ToInt(_)
             | Expr::StrLen(_) => Type::Int,
+
+            // Arithmetic is Real as soon as one operand is; `/` is always Real.
+            Expr::Add(args) | Expr::Sub(args) | Expr::Mul(args) => {
+                if args.iter().any(|a| a.get_type() == Type::Real) {
+                    Type::Real
+                } else {
+                    Type::Int
+                }
+            }
+            Expr::Div(_, _) => Type::Real,
 
             Expr::Real(_, _) => Type::Real,
             Expr::BigRat(_, den) => {
@@ -51,10 +57,26 @@ impl Expr {
             | Expr::BvOr(a, _)
             | Expr::BvXor(a, _)
             | Expr::BvNot(a)
+            | Expr::BvNeg(a)
+            | Expr::BvUdiv(a, _)
+            | Expr::BvUrem(a, _)
+            | Expr::BvSdiv(a, _)
+            | Expr::BvSrem(a, _)
+            | Expr::BvSmod(a, _)
+            | Expr::BvRotl(_, a)
+            | Expr::BvRotr(_, a)
             | Expr::BvShl(a, _)
             | Expr::BvLshr(a, _)
             | Expr::BvAshr(a, _) => a.get_type(),
             Expr::BvExtract(h, l, _) => Type::BitVec(h - l + 1),
+            Expr::BvZeroExt(n, a) | Expr::BvSignExt(n, a) => match a.get_type() {
+                Type::BitVec(w) => Type::BitVec(w + n),
+                _ => Type::Unknown,
+            },
+            Expr::BvRepeat(n, a) => match a.get_type() {
+                Type::BitVec(w) => Type::BitVec(w * n),
+                _ => Type::Unknown,
+            },
             Expr::BvConcat(a, b) => {
                 if let (Type::BitVec(wa), Type::BitVec(wb)) = (a.get_type(), b.get_type()) {
                     Type::BitVec(wa + wb)
@@ -96,7 +118,10 @@ impl Expr {
                 _ => Type::Unknown,
             },
             Expr::App(_, _) => Type::Unknown,
-            Expr::Ite(_, t, _) => t.get_type(),
+            Expr::Ite(_, t, e) => match (t.get_type(), e.get_type()) {
+                (Type::Int, Type::Real) | (Type::Real, Type::Int) => Type::Real,
+                (ty, _) => ty,
+            },
         }
     }
 
@@ -222,6 +247,17 @@ impl Expr {
             Expr::App(n, v) => Expr::App(n.clone(), v.iter().map(&mut *f).collect()),
             Expr::Not(a) => Expr::Not(b(a, f)),
             Expr::BvNot(a) => Expr::BvNot(b(a, f)),
+            Expr::BvNeg(a) => Expr::BvNeg(b(a, f)),
+            Expr::BvZeroExt(n, a) => Expr::BvZeroExt(*n, b(a, f)),
+            Expr::BvSignExt(n, a) => Expr::BvSignExt(*n, b(a, f)),
+            Expr::BvRotl(n, a) => Expr::BvRotl(*n, b(a, f)),
+            Expr::BvRotr(n, a) => Expr::BvRotr(*n, b(a, f)),
+            Expr::BvRepeat(n, a) => Expr::BvRepeat(*n, b(a, f)),
+            Expr::BvUdiv(x, y) => Expr::BvUdiv(b(x, f), b(y, f)),
+            Expr::BvUrem(x, y) => Expr::BvUrem(b(x, f), b(y, f)),
+            Expr::BvSdiv(x, y) => Expr::BvSdiv(b(x, f), b(y, f)),
+            Expr::BvSrem(x, y) => Expr::BvSrem(b(x, f), b(y, f)),
+            Expr::BvSmod(x, y) => Expr::BvSmod(b(x, f), b(y, f)),
             Expr::StrLen(a) => Expr::StrLen(b(a, f)),
             Expr::ToInt(a) => Expr::ToInt(b(a, f)),
             Expr::ConstArray(ty, a) => Expr::ConstArray(ty.clone(), b(a, f)),
@@ -376,6 +412,18 @@ pub enum Expr {
     BvOr(Box<Expr>, Box<Expr>),
     BvXor(Box<Expr>, Box<Expr>),
     BvNot(Box<Expr>),
+    BvNeg(Box<Expr>),
+    BvUdiv(Box<Expr>, Box<Expr>),
+    BvUrem(Box<Expr>, Box<Expr>),
+    BvSdiv(Box<Expr>, Box<Expr>),
+    BvSrem(Box<Expr>, Box<Expr>),
+    BvSmod(Box<Expr>, Box<Expr>),
+    /// `((_ zero_extend n) x)`, `sign_extend`, `rotate_left`, `rotate_right`, `repeat`.
+    BvZeroExt(usize, Box<Expr>),
+    BvSignExt(usize, Box<Expr>),
+    BvRotl(usize, Box<Expr>),
+    BvRotr(usize, Box<Expr>),
+    BvRepeat(usize, Box<Expr>),
     BvShl(Box<Expr>, Box<Expr>),
     BvLshr(Box<Expr>, Box<Expr>),
     BvAshr(Box<Expr>, Box<Expr>),

@@ -215,6 +215,105 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
             };
             Some(Value::Bool(x.is_integer()))
         }
+        Expr::BvNeg(a) => {
+            let Value::Bv(v, w) = ev(a, model, funs)? else {
+                return None;
+            };
+            Some(Value::Bv(v.wrapping_neg() & mask(w), w))
+        }
+        Expr::BvZeroExt(n, a) | Expr::BvSignExt(n, a) => {
+            let Value::Bv(v, w) = ev(a, model, funs)? else {
+                return None;
+            };
+            if w + n > 64 {
+                return None;
+            }
+            let extended = if matches!(expr, Expr::BvSignExt(_, _)) {
+                (signed(v, w) as u64) & mask(w + n)
+            } else {
+                v
+            };
+            Some(Value::Bv(extended, w + n))
+        }
+        Expr::BvRotl(n, a) | Expr::BvRotr(n, a) => {
+            let Value::Bv(v, w) = ev(a, model, funs)? else {
+                return None;
+            };
+            let k = n % w;
+            let left = if matches!(expr, Expr::BvRotl(_, _)) {
+                k
+            } else {
+                (w - k) % w
+            };
+            let rotated = if left == 0 {
+                v
+            } else {
+                ((v << left) | (v >> (w - left))) & mask(w)
+            };
+            Some(Value::Bv(rotated, w))
+        }
+        Expr::BvRepeat(n, a) => {
+            let Value::Bv(v, w) = ev(a, model, funs)? else {
+                return None;
+            };
+            if w * n > 64 || *n == 0 {
+                return None;
+            }
+            let mut out = 0u64;
+            for _ in 0..*n {
+                out = (out << w) | v;
+            }
+            Some(Value::Bv(out, w * n))
+        }
+        Expr::BvUdiv(a, b)
+        | Expr::BvUrem(a, b)
+        | Expr::BvSdiv(a, b)
+        | Expr::BvSrem(a, b)
+        | Expr::BvSmod(a, b) => {
+            let (Value::Bv(x, w), Value::Bv(y, wy)) = (ev(a, model, funs)?, ev(b, model, funs)?)
+            else {
+                return None;
+            };
+            if w != wy {
+                return None;
+            }
+            let m = mask(w);
+            let (sx, sy) = (signed(x, w), signed(y, w));
+            let out = match expr {
+                // SMT-LIB: x / 0 is all ones and x % 0 is x.
+                Expr::BvUdiv(_, _) => x.checked_div(y).unwrap_or(m),
+                Expr::BvUrem(_, _) => x.checked_rem(y).unwrap_or(x),
+                Expr::BvSdiv(_, _) => {
+                    if y == 0 {
+                        if sx < 0 {
+                            1
+                        } else {
+                            m
+                        }
+                    } else {
+                        (sx.wrapping_div(sy) as u64) & m
+                    }
+                }
+                Expr::BvSrem(_, _) => {
+                    if y == 0 {
+                        x
+                    } else {
+                        (sx.wrapping_rem(sy) as u64) & m
+                    }
+                }
+                _ => {
+                    // bvsmod: result takes the sign of the divisor
+                    if y == 0 {
+                        x
+                    } else {
+                        let r = sx.rem_euclid(sy.abs());
+                        let r = if sy < 0 && r != 0 { r + sy } else { r };
+                        (r as u64) & m
+                    }
+                }
+            };
+            Some(Value::Bv(out, w))
+        }
         Expr::BvNot(a) => {
             let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;

@@ -28,7 +28,7 @@ class Gen:
         self.incr = False
         if profile == "incr":
             # the incremental driver draws its formulas from one of the other generators
-            self.profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts"])
+            self.profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "arr", "arrsort"])
             self.incr = True
 
     # --- terms ---
@@ -88,12 +88,27 @@ class Gen:
         two = ["bvadd", "bvsub", "bvmul", "bvand", "bvor", "bvxor", "bvshl", "bvlshr", "bvashr"]
         if k < 0.65:
             return f"({r.choice(two)} {self.bv_term(d-1)} {self.bv_term(d-1)})"
-        if k < 0.75:
+        if k < 0.70:
             return f"(bvnot {self.bv_term(d-1)})"
+        if k < 0.76:
+            op = r.choice(["bvneg", "bvnand", "bvnor", "bvxnor"])
+            if op == "bvneg":
+                return f"(bvneg {self.bv_term(d-1)})"
+            return f"({op} {self.bv_term(d-1)} {self.bv_term(d-1)})"
+        if k < 0.82:
+            return f"({r.choice(['bvudiv','bvurem','bvsdiv','bvsrem','bvsmod'])} {self.bv_term(d-1)} {self.bv_term(d-1)})"
         if k < 0.85:
             return f"(concat ((_ extract 3 0) {self.bv_term(d-1)}) ((_ extract 7 4) {self.bv_term(d-1)}))"
-        if k < 0.92:
+        if k < 0.90:
             return f"(ite {self.bool_term(d-1)} {self.bv_term(d-1)} {self.bv_term(d-1)})"
+        if k < 0.95:
+            return r.choice([
+                f"((_ extract 7 0) ((_ zero_extend 3) {self.bv_term(d-1)}))",
+                f"((_ extract 7 0) ((_ sign_extend 5) {self.bv_term(d-1)}))",
+                f"((_ rotate_left {r.randint(0,10)}) {self.bv_term(d-1)})",
+                f"((_ rotate_right {r.randint(0,10)}) {self.bv_term(d-1)})",
+                f"((_ extract 7 0) ((_ repeat 2) {self.bv_term(d-1)}))",
+            ])
         return f"((_ extract 7 0) {self.bv_term(d-1)})"
 
     def atom(self, d):
@@ -178,9 +193,24 @@ class Gen:
         two = ["bvadd", "bvsub", "bvmul", "bvand", "bvor", "bvxor", "bvshl", "bvlshr", "bvashr"]
         if k < 0.6:
             return f"({r.choice(two)} {self.bvw_term(d-1)} {self.bvw_term(d-1)})"
-        if k < 0.7:
+        if k < 0.66:
             return f"(bvnot {self.bvw_term(d-1)})"
-        if k < 0.8 and w >= 2:
+        if k < 0.72:
+            op = r.choice(["bvneg", "bvnand", "bvnor", "bvxnor"])
+            if op == "bvneg":
+                return f"(bvneg {self.bvw_term(d-1)})"
+            return f"({op} {self.bvw_term(d-1)} {self.bvw_term(d-1)})"
+        if k < 0.78:
+            return f"({r.choice(['bvudiv','bvurem','bvsdiv','bvsrem','bvsmod'])} {self.bvw_term(d-1)} {self.bvw_term(d-1)})"
+        if k < 0.82:
+            return r.choice([
+                f"((_ extract {w-1} 0) ((_ zero_extend {r.randint(1,4)}) {self.bvw_term(d-1)}))",
+                f"((_ extract {w-1} 0) ((_ sign_extend {r.randint(1,4)}) {self.bvw_term(d-1)}))",
+                f"((_ rotate_left {r.randint(0,70)}) {self.bvw_term(d-1)})",
+                f"((_ rotate_right {r.randint(0,70)}) {self.bvw_term(d-1)})",
+                f"((_ extract {w-1} 0) ((_ repeat 2) {self.bvw_term(d-1)}))",
+            ]) if w <= 32 else f"(bvnot {self.bvw_term(d-1)})"
+        if k < 0.86 and w >= 2:
             h = r.randint(0, w - 2)
             return (f"(concat ((_ extract {h} 0) {self.bvw_term(d-1)}) "
                     f"((_ extract {w-1} {h+1}) {self.bvw_term(d-1)}))")
@@ -189,7 +219,9 @@ class Gen:
         return f"((_ extract {w-1} 0) {self.bvw_term(d-1)})"
 
     def bvw_atom(self, d):
-        op = self.r.choice(["=", "distinct", "bvult", "bvule", "bvslt", "bvsle", "bvugt", "bvuge", "bvsgt", "bvsge"])
+        op = self.r.choice(["=", "distinct", "bvult", "bvule", "bvslt", "bvsle", "bvugt", "bvuge", "bvsgt", "bvsge", "bvcomp"])
+        if op == "bvcomp":
+            return f"(= (bvcomp {self.bvw_term(d)} {self.bvw_term(d)}) #b1)"
         return f"({op} {self.bvw_term(d)} {self.bvw_term(d)})"
 
     def bvw_formula(self, d):
@@ -241,8 +273,78 @@ class Gen:
             return f"(not {self.sort_formula(d-1)})"
         return f"(=> {self.sort_formula(d-1)} {self.sort_formula(d-1)})"
 
+    # --- arrays (Int -> Int) and arrays over uninterpreted sorts ---
+    def arr_index(self, d):
+        r = self.r
+        if self.profile == "arrsort":
+            return r.choice(["i1", "i2", "i3"])
+        if d <= 0 or r.random() < 0.5:
+            return r.choice(["a", "b", "c", str(r.randint(0, 3))])
+        return f"(+ {self.arr_index(d-1)} {r.choice(['1','2','(- 1)'])})"
+
+    def arr_elem(self, d):
+        r = self.r
+        if self.profile == "arrsort":
+            return r.choice(["e1", "e2", "e3"])
+        if d <= 0 or r.random() < 0.5:
+            return r.choice(["a", "b", str(r.randint(0, 4))])
+        return f"(+ {self.arr_elem(d-1)} {r.choice(['1','2'])})"
+
+    def arr_term(self, d):
+        r = self.r
+        if d <= 0 or r.random() < 0.35:
+            return r.choice(["A", "B", "C"])
+        k = r.random()
+        if k < 0.7:
+            return f"(store {self.arr_term(d-1)} {self.arr_index(1)} {self.arr_elem(1)})"
+        if k < 0.82 and self.profile == "arr":
+            return f"((as const (Array Int Int)) {r.randint(0, 3)})"
+        return f"(ite {self.arr_atom(d-1)} {self.arr_term(d-1)} {self.arr_term(d-1)})"
+
+    def arr_val(self, d):
+        return f"(select {self.arr_term(d)} {self.arr_index(1)})"
+
+    def arr_atom(self, d):
+        r = self.r
+        k = r.random()
+        if k < 0.35:
+            return f"(= {self.arr_term(d)} {self.arr_term(d)})"
+        if k < 0.55:
+            return f"(= {self.arr_val(d)} {self.arr_elem(1)})"
+        if k < 0.75:
+            return f"(= {self.arr_val(d)} {self.arr_val(d)})"
+        if k < 0.88 and self.profile == "arr":
+            return f"({r.choice(['<','<=','>'])} {self.arr_val(d)} {self.arr_val(d)})"
+        if k < 0.94:
+            return f"(= {self.arr_index(1)} {self.arr_index(1)})"
+        return r.choice(["m", "n"])
+
+    def arr_formula(self, d):
+        r = self.r
+        if d <= 0 or r.random() < 0.35:
+            return self.arr_atom(max(d, 1))
+        k = r.random()
+        if k < 0.35:
+            return f"(and {self.arr_formula(d-1)} {self.arr_formula(d-1)})"
+        if k < 0.7:
+            return f"(or {self.arr_formula(d-1)} {self.arr_formula(d-1)})"
+        if k < 0.85:
+            return f"(not {self.arr_formula(d-1)})"
+        return f"(=> {self.arr_formula(d-1)} {self.arr_formula(d-1)})"
+
     def declarations(self):
         lines = ["(set-logic ALL)"]
+        if self.profile in ("arr", "arrsort"):
+            if self.profile == "arrsort":
+                lines += ["(declare-sort I 0)", "(declare-sort E 0)"]
+                lines += [f"(declare-fun i{k} () I)" for k in (1, 2, 3)]
+                lines += [f"(declare-fun e{k} () E)" for k in (1, 2, 3)]
+                lines += [f"(declare-fun {v} () (Array I E))" for v in "ABC"]
+            else:
+                lines += [f"(declare-fun {v} () Int)" for v in "abc"]
+                lines += [f"(declare-fun {v} () (Array Int Int))" for v in "ABC"]
+            lines += [f"(declare-fun {v} () Bool)" for v in "mn"]
+            return lines
         if self.profile == "sorts":
             lines += ["(declare-sort U 0)"]
             lines += [f"(declare-fun s{i} () U)" for i in range(1, 5)]
@@ -259,6 +361,8 @@ class Gen:
         return lines
 
     def one_assertion(self, depth):
+        if self.profile in ("arr", "arrsort"):
+            return f"(assert {self.arr_formula(depth)})"
         if self.profile == "sorts":
             return f"(assert {self.sort_formula(depth)})"
         if self.profile == "bvw":
@@ -321,7 +425,7 @@ def run(bin_args, path):
 
 def one(i):
     rng = random.Random(SEED * 1_000_003 + i)
-    profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "incr"])
+    profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "arr", "arrsort", "incr"])
     text = Gen(rng, profile).script()
     path = os.path.join(OUT, f"case_{i}.smt2")
     with open(path, "w") as fh:
