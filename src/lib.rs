@@ -43,6 +43,7 @@ use crate::theory::array_reduce::ArrayReducer;
 use crate::theory::cc::Cc;
 use crate::theory::fp::FpSolver;
 use crate::theory::linarith::LinArith;
+use crate::theory::skolem::Skolemizer;
 use crate::theory::{
     ArraySolver, EufSolver, NlaSolver, QuantifierSolver, StringSolver, TheorySolver,
 };
@@ -135,6 +136,13 @@ pub struct Rz3Solver {
     lin: LinArith,
     cc: Cc,
     arrays: ArrayReducer,
+    skolem: Skolemizer,
+    /// Normalised (NNF, skolemised) formulas that still contain a universal quantifier.
+    quant_formulas: Vec<Expr>,
+    /// Instance lemmas already produced, to avoid repeating them.
+    quant_done: std::collections::BTreeSet<Expr>,
+    /// While set, assertions bypass skolemisation (instance lemmas refer to the quantifier atom).
+    skip_skolem: bool,
     /// Comparison atoms with nonlinear content (decided or declined by the NLA theory).
     nla_atoms: Vec<(Expr, i32)>,
     /// Array / string / floating-point / quantifier content is present, so the generic
@@ -193,6 +201,10 @@ impl Rz3Solver {
             lin: LinArith::new(),
             cc: Cc::new(),
             arrays: ArrayReducer::new(),
+            skolem: Skolemizer::new(),
+            quant_formulas: Vec::new(),
+            quant_done: std::collections::BTreeSet::new(),
+            skip_skolem: false,
             nla_atoms: Vec::new(),
             slow: false,
             euf: EufSolver::new(),
@@ -273,6 +285,9 @@ impl Rz3Solver {
         self.lin = LinArith::new();
         self.cc = Cc::new();
         self.arrays = ArrayReducer::new();
+        self.skolem = Skolemizer::new();
+        self.quant_formulas = Vec::new();
+        self.quant_done = std::collections::BTreeSet::new();
         self.nla_atoms = Vec::new();
         self.slow = false;
         self.euf = EufSolver::new();
@@ -314,6 +329,22 @@ impl Rz3Solver {
             self.sat_solver.unwind(&mut hooks);
         }
         let typed = self.resolve_expr_types(expr);
+        // Quantifiers: negation normal form, existentials replaced by skolem symbols. An
+        // opaque `exists` atom would make `exists x. false` satisfiable.
+        let typed = if !self.skip_skolem && Skolemizer::contains_quantifier(&typed) {
+            let (nnf, symbols) = self.skolem.run(&typed);
+            for (name, ty) in symbols {
+                self.declare_fun(name, ty);
+            }
+            if nnf.any_subterm(&|e| matches!(e, Expr::ForAll(_, _))) {
+                // Instances can refute a model but never prove one: no `sat` from here on.
+                self.incomplete = true;
+                self.quant_formulas.push(nnf.clone());
+            }
+            nnf
+        } else {
+            typed
+        };
         let mut def_lemmas = Vec::new();
         let typed = self.eliminate_defs(&typed, &mut def_lemmas);
         for lemma in def_lemmas {
@@ -1209,7 +1240,9 @@ impl Rz3Solver {
     pub fn check(&mut self) -> SolverResult {
         // Branch-and-bound lemmas added for integer variables in this call.
         const MAX_BRANCHES: usize = 5000;
+        const MAX_QUANT_ROUNDS: usize = 8;
         let mut branches = 0usize;
+        let mut quant_rounds = 0usize;
         self.stats.check_calls += 1;
         loop {
             if self.deadline.is_some_and(|d| std::time::Instant::now() > d) {
@@ -1296,16 +1329,39 @@ impl Rz3Solver {
                 }
             }
 
-            let (array_lemmas, quant_lemmas, string_lemmas) = if self.slow {
-                let model = self.get_model();
-                (
-                    self.array.generate_lemmas(),
-                    self.quant.generate_lemmas(&mut self.euf, &model),
-                    self.string.generate_lemmas(),
-                )
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
+            // Ground-term instantiation of the remaining universal quantifiers.
+            if !self.quant_formulas.is_empty() && quant_rounds < MAX_QUANT_ROUNDS {
+                let instances = self.quantifier_instances();
+                if !instances.is_empty() {
+                    quant_rounds += 1;
+                    // Consequences of the problem, not user assertions: kept out of the history.
+                    if std::env::var_os("RZ3_QDEBUG").is_some() {
+                        for l in &instances {
+                            eprintln!("INSTANCE {l:?}");
+                        }
+                    }
+                    self.skip_skolem = true;
+                    for lemma in instances {
+                        self.assert_no_track(&lemma);
+                    }
+                    self.skip_skolem = false;
+                    continue;
+                }
+            }
+
+            // The legacy quantifier solver is no longer asked for lemmas: an audit found one of
+            // its instances to be invalid (a wrong `unsat`). `quantifier_instances` above
+            // replaces it; the legacy array / string solvers are kept for the generic path.
+            let (array_lemmas, quant_lemmas, string_lemmas): (Vec<Expr>, Vec<Expr>, Vec<Expr>) =
+                if self.slow {
+                    (
+                        self.array.generate_lemmas(),
+                        Vec::new(),
+                        self.string.generate_lemmas(),
+                    )
+                } else {
+                    (Vec::new(), Vec::new(), Vec::new())
+                };
             if !(array_lemmas.is_empty() && quant_lemmas.is_empty() && string_lemmas.is_empty()) {
                 for lemma in array_lemmas
                     .into_iter()
@@ -1356,6 +1412,124 @@ impl Rz3Solver {
             }
             return SolverResult::Sat;
         }
+    }
+
+    /// Ground terms of the problem (no bound variable), grouped by sort.
+    fn ground_terms(&self) -> BTreeMap<Type, Vec<Expr>> {
+        fn walk(
+            e: &Expr,
+            bound: &mut Vec<String>,
+            out: &mut BTreeMap<Type, std::collections::BTreeSet<Expr>>,
+        ) {
+            match e {
+                Expr::ForAll(vars, body) | Expr::Exists(vars, body) => {
+                    let depth = bound.len();
+                    bound.extend(vars.iter().map(|(n, _)| n.clone()));
+                    walk(body, bound, out);
+                    bound.truncate(depth);
+                }
+                _ => {
+                    let ground =
+                        !e.any_subterm(&|x| matches!(x, Expr::Var(n, _) if bound.contains(n)));
+                    let ty = e.get_type();
+                    if ground
+                        && !matches!(ty, Type::Bool | Type::Unknown | Type::Fn(_, _))
+                        && matches!(
+                            e,
+                            Expr::Var(_, _)
+                                | Expr::App(_, _)
+                                | Expr::Int(_)
+                                | Expr::Real(_, _)
+                                | Expr::BigRat(_, _)
+                                | Expr::BvConst(_, _)
+                                | Expr::Add(_)
+                                | Expr::Sub(_)
+                                | Expr::Mul(_)
+                        )
+                    {
+                        out.entry(ty).or_default().insert(e.clone());
+                    }
+                    e.map_children(&mut |c| {
+                        walk(c, bound, out);
+                        c.clone()
+                    });
+                }
+            }
+        }
+        let mut out: BTreeMap<Type, std::collections::BTreeSet<Expr>> = BTreeMap::new();
+        for f in self
+            .quant_formulas
+            .iter()
+            .chain(self.assertion_history.iter())
+        {
+            walk(f, &mut Vec::new(), &mut out);
+        }
+        // Seeds, so that bodies with only bound variables still get instantiated.
+        out.entry(Type::Int).or_default().insert(Expr::Int(0));
+        out.entry(Type::Real).or_default().insert(Expr::Real(0, 0));
+        out.into_iter()
+            .map(|(k, v)| (k, v.into_iter().take(40).collect()))
+            .collect()
+    }
+
+    /// Instances `U -> body[t]` of every universal `U` still in the problem, for ground terms
+    /// `t` of the right sort. Bounded per round; the caller iterates a few rounds.
+    fn quantifier_instances(&mut self) -> Vec<Expr> {
+        const PER_ROUND: usize = 4000;
+        let terms = self.ground_terms();
+        let mut universals: Vec<Expr> = Vec::new();
+        fn collect(e: &Expr, out: &mut Vec<Expr>) {
+            if matches!(e, Expr::ForAll(_, _)) && !out.contains(e) {
+                out.push(e.clone());
+            }
+            e.map_children(&mut |c| {
+                collect(c, out);
+                c.clone()
+            });
+        }
+        for f in self.quant_formulas.clone() {
+            collect(&f, &mut universals);
+        }
+        let mut lemmas = Vec::new();
+        for u in universals {
+            let Expr::ForAll(vars, body) = &u else {
+                continue;
+            };
+            // candidate tuples
+            let mut tuples: Vec<Vec<Expr>> = vec![Vec::new()];
+            for (_, ty) in vars {
+                let Some(cands) = terms.get(ty) else {
+                    tuples.clear();
+                    break;
+                };
+                let mut next = Vec::new();
+                for t in &tuples {
+                    for c in cands {
+                        if next.len() >= PER_ROUND {
+                            break;
+                        }
+                        let mut t2 = t.clone();
+                        t2.push(c.clone());
+                        next.push(t2);
+                    }
+                }
+                tuples = next;
+            }
+            for tuple in tuples {
+                let mut inst = (**body).clone();
+                for ((name, _), term) in vars.iter().zip(&tuple) {
+                    inst = crate::theory::skolem::substitute(&inst, name, term);
+                }
+                let lemma = Expr::Or(vec![Expr::Not(Box::new(u.clone())), inst]);
+                if self.quant_done.insert(lemma.clone()) {
+                    lemmas.push(lemma);
+                    if lemmas.len() >= PER_ROUND {
+                        return lemmas;
+                    }
+                }
+            }
+        }
+        lemmas
     }
 
     /// Feed the arrays / strings / floating-point / quantifier / nonlinear / equality

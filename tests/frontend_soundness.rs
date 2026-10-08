@@ -15,6 +15,8 @@ enum Want {
     Unsat,
     /// Truth is unsat; `unknown` or an explicit error are acceptable, `sat` is not.
     UnsatOrDecline,
+    /// Truth is sat; `unknown` or an explicit error are acceptable, `unsat` is not.
+    SatOrDecline,
     /// A parse/unsupported error is required (no verdict at all).
     Error,
 }
@@ -39,6 +41,11 @@ fn check(name: &str, body: &str, want: Want) -> Option<String> {
                 Ok(SolverResult::Unsat | SolverResult::Unknown)
             )
             | (Want::UnsatOrDecline, Err(_))
+            | (
+                Want::SatOrDecline,
+                Ok(SolverResult::Sat | SolverResult::Unknown)
+            )
+            | (Want::SatOrDecline, Err(_))
             | (Want::Error, Err(_))
     );
     if ok {
@@ -158,6 +165,15 @@ fn text_path_never_weakens_a_formula() {
         ("repeat", "(assert (= p #xa5))(assert (not (= ((_ extract 15 8) ((_ repeat 2) p)) #xa5)))", Unsat),
         ("bvnand", "(assert (= p #xf0))(assert (not (= (bvnand p #x3c) #xcf)))", Unsat),
         ("bvcomp", "(assert (= p q))(assert (not (= (bvcomp p q) #b1)))", Unsat),
+        // quantifiers: an existential is not a free Boolean
+        ("exists with a false body", "(assert (exists ((q Int)) (> (* 2 0) 0)))", Unsat),
+        ("exists needs a witness", "(assert (exists ((q Int)) (and (> q a) (< q a))))", Unsat),
+        ("exists satisfiable", "(assert (exists ((q Int)) (> q a)))", SatOrDecline),
+        ("not forall is exists", "(assert (not (forall ((q Int)) (> q a))))", SatOrDecline),
+        ("negated exists is forall", "(assert (not (exists ((q Int)) (> q 0))))(assert (> a 0))", Unsat),
+        ("forall instantiation refutes", "(assert (forall ((q Int)) (> (f q) q)))(assert (<= (f a) a))", Unsat),
+        ("exists under forall", "(assert (forall ((q Int)) (exists ((r Int)) (> r q))))", SatOrDecline),
+        ("forall exists contradiction", "(assert (exists ((q Int)) (forall ((r Int)) (and (> (f a) 0) (>= (+ q r) 1)))))", UnsatOrDecline),
         // front end must reject, not guess
         ("error inside the last command", "(assert (> a 0))(check-sat ')", Error),
         ("undeclared symbol", "(assert (> zz 1))", Error),

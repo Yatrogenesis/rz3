@@ -10,6 +10,7 @@ pub mod nla;
 pub mod qnum;
 pub mod quantifier;
 pub mod simplex;
+pub mod skolem;
 pub mod string;
 
 pub use crate::ast::fp::{FloatSort, FloatValue, RoundingMode};
