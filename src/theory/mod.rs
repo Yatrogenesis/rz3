@@ -2,6 +2,7 @@ pub mod array;
 pub mod array_reduce;
 pub mod bv;
 pub mod cc;
+pub mod diff;
 pub mod euf;
 pub mod fp;
 pub mod linarith;

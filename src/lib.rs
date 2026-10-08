@@ -41,6 +41,7 @@ use crate::sat::CdclSolver;
 use crate::tactic::{Simplifier, SolveEqs, TacticEngine};
 use crate::theory::array_reduce::ArrayReducer;
 use crate::theory::cc::Cc;
+use crate::theory::diff::DiffLogic;
 use crate::theory::fp::FpSolver;
 use crate::theory::linarith::LinArith;
 use crate::theory::skolem::Skolemizer;
@@ -55,29 +56,50 @@ use std::collections::BTreeMap;
 struct Hooks<'a> {
     lin: &'a mut LinArith,
     cc: &'a mut Cc,
+    dl: &'a mut DiffLogic,
 }
 
 impl crate::sat::TheoryHook for Hooks<'_> {
     fn new_level(&mut self) {
         self.lin.new_level();
         self.cc.new_level();
+        self.dl.new_level();
     }
 
     fn backtrack(&mut self, level: usize) {
         self.lin.backtrack(level);
         self.cc.backtrack(level);
+        self.dl.backtrack(level);
     }
 
     fn assign(&mut self, lit: i32) -> Result<(), Vec<i32>> {
         self.lin.assign(lit)?;
-        self.cc.assign(lit)
+        self.cc.assign(lit)?;
+        self.dl.assign(lit)
     }
 
     #[allow(clippy::type_complexity)]
     fn check(&mut self) -> Result<Vec<(i32, Vec<i32>)>, Vec<i32>> {
         let mut implied = self.lin.check()?;
         implied.extend(self.cc.check()?);
+        implied.extend(self.dl.check()?);
         Ok(implied)
+    }
+}
+
+/// `r` rounded to a multiple of `2^-bits` (integers stay as they are).
+fn grid_point(r: &BigRational, bits: u32) -> BigRational {
+    if r.is_integer() {
+        return r.clone();
+    }
+    let scale = BigRational::from_integer(num_bigint::BigInt::from(1) << bits);
+    (r * &scale).round() / scale
+}
+
+fn var_name(e: &Expr) -> String {
+    match e {
+        Expr::Var(n, _) => n.clone(),
+        _ => String::new(),
     }
 }
 
@@ -106,6 +128,10 @@ pub struct Stats {
     pub theory_ns: u128,
     pub certify_ns: u128,
     pub lin_ns: u128,
+    pub dl_ns: u128,
+    pub dl_repair_ns: u128,
+    pub dl_search_ns: u128,
+    pub dl_propagations: u64,
     pub propagations: u64,
     pub check_calls: u64,
     pub dpll_iterations: u64,
@@ -113,6 +139,7 @@ pub struct Stats {
     pub branches: u64,
     pub pivots: u64,
     pub array_instances: u64,
+    pub nonlinear_lemmas: u64,
     pub sat: crate::sat::SatStats,
     /// Why the last `check()` answered `Unknown`, if it did.
     pub unknown_reason: Option<&'static str>,
@@ -135,12 +162,19 @@ pub struct Rz3Solver {
 
     lin: LinArith,
     cc: Cc,
+    diff: DiffLogic,
     arrays: ArrayReducer,
     skolem: Skolemizer,
     /// Normalised (NNF, skolemised) formulas that still contain a universal quantifier.
     quant_formulas: Vec<Expr>,
     /// Instance lemmas already produced, to avoid repeating them.
     quant_done: std::collections::BTreeSet<Expr>,
+    /// Variables standing for nonlinear factors / partial products (memoised).
+    nl_vars: BTreeMap<Expr, Expr>,
+    /// Monomials whose sign lemmas have been added.
+    nl_sign_done: std::collections::BTreeSet<String>,
+    /// Nonlinear lemma instances already asserted.
+    nl_done: std::collections::BTreeSet<Expr>,
     /// While set, assertions bypass skolemisation (instance lemmas refer to the quantifier atom).
     skip_skolem: bool,
     /// Comparison atoms with nonlinear content (decided or declined by the NLA theory).
@@ -200,10 +234,14 @@ impl Rz3Solver {
             tactic_engine,
             lin: LinArith::new(),
             cc: Cc::new(),
+            diff: DiffLogic::new(),
             arrays: ArrayReducer::new(),
             skolem: Skolemizer::new(),
             quant_formulas: Vec::new(),
             quant_done: std::collections::BTreeSet::new(),
+            nl_vars: BTreeMap::new(),
+            nl_sign_done: std::collections::BTreeSet::new(),
+            nl_done: std::collections::BTreeSet::new(),
             skip_skolem: false,
             nla_atoms: Vec::new(),
             slow: false,
@@ -284,10 +322,14 @@ impl Rz3Solver {
         self.tactic_engine = te;
         self.lin = LinArith::new();
         self.cc = Cc::new();
+        self.diff = DiffLogic::new();
         self.arrays = ArrayReducer::new();
         self.skolem = Skolemizer::new();
         self.quant_formulas = Vec::new();
         self.quant_done = std::collections::BTreeSet::new();
+        self.nl_vars = BTreeMap::new();
+        self.nl_sign_done = std::collections::BTreeSet::new();
+        self.nl_done = std::collections::BTreeSet::new();
         self.nla_atoms = Vec::new();
         self.slow = false;
         self.euf = EufSolver::new();
@@ -325,6 +367,7 @@ impl Rz3Solver {
             let mut hooks = Hooks {
                 lin: &mut self.lin,
                 cc: &mut self.cc,
+                dl: &mut self.diff,
             };
             self.sat_solver.unwind(&mut hooks);
         }
@@ -353,6 +396,11 @@ impl Rz3Solver {
         let mut ite_lemmas = Vec::new();
         let typed = self.eliminate_ite(&typed, &mut ite_lemmas);
         for lemma in ite_lemmas {
+            self.assert_no_track(&lemma);
+        }
+        let mut nl_lemmas = Vec::new();
+        let typed = self.purify_nonlinear(&typed, &mut nl_lemmas);
+        for lemma in nl_lemmas {
             self.assert_no_track(&lemma);
         }
         let typed = self.lift_ite(&typed);
@@ -992,7 +1040,10 @@ impl Rz3Solver {
             self.lit_to_expr.insert(lit, expr.clone());
             if self.is_arith_atom(expr) {
                 self.lin.register(lit, expr);
-                if expr.has_nonlinear_arith() {
+                if let Some(d) = self.lin.take_dl() {
+                    self.diff.register(&d);
+                }
+                if expr.has_unhandled_nonlinear() {
                     self.nla_atoms.push((expr.clone(), lit));
                 }
             } else if self.is_cc_atom(expr) {
@@ -1241,6 +1292,8 @@ impl Rz3Solver {
         // Branch-and-bound lemmas added for integer variables in this call.
         const MAX_BRANCHES: usize = 5000;
         const MAX_QUANT_ROUNDS: usize = 8;
+        const MAX_NL_ROUNDS: usize = 400;
+        let mut nl_rounds = 0usize;
         let mut branches = 0usize;
         let mut quant_rounds = 0usize;
         self.stats.check_calls += 1;
@@ -1249,11 +1302,17 @@ impl Rz3Solver {
                 return self.unknown("time limit");
             }
             self.stats.dpll_iterations += 1;
+            // Propagating through the difference graph pays only when it covers the whole
+            // arithmetic part of the problem; mixed problems keep just its cycle detection.
+            self.diff.propagate =
+                !self.diff.is_empty() && self.diff.num_atoms() == self.lin.num_atoms();
+            self.diff.enabled = std::env::var_os("RZ3_DIFF_LOGIC").is_some();
             let sat_started = std::time::Instant::now();
             let status = {
                 let mut hooks = Hooks {
                     lin: &mut self.lin,
                     cc: &mut self.cc,
+                    dl: &mut self.diff,
                 };
                 self.sat_solver.solve_with(&mut hooks, self.deadline)
             };
@@ -1262,6 +1321,10 @@ impl Rz3Solver {
             self.stats.sat = self.sat_solver.stats;
             self.stats.theory_conflicts = self.lin.conflicts;
             self.stats.lin_ns = self.lin.time_ns;
+            self.stats.dl_ns = self.diff.time_ns;
+            self.stats.dl_repair_ns = self.diff.repair_ns;
+            self.stats.dl_search_ns = self.diff.search_ns;
+            self.stats.dl_propagations = self.diff.propagations;
             match status {
                 crate::sat::SolveStatus::Unsat => return SolverResult::Unsat,
                 crate::sat::SolveStatus::Interrupted => return self.unknown("time limit"),
@@ -1305,6 +1368,39 @@ impl Rz3Solver {
                     Expr::Ge(Box::new(x), Box::new(Expr::Int(high))),
                 ]));
                 continue;
+            }
+
+            // Incremental linearization of nonlinear products: refine until the model is exact.
+            if !self.lin.monomials().is_empty() {
+                let model = self.raw_model();
+                // The abstract product variables may be wrong while the real variables already
+                // satisfy every assertion with exact products (the certifier evaluates the
+                // true products): then there is nothing to refine.
+                let funs = self.function_table(&model);
+                let none = crate::eval::FunTable::new();
+                let satisfied =
+                    !self.processed.iter().any(|f| {
+                        crate::eval::holds(f, &model, &none) != crate::eval::Verdict::True
+                    }) && !self.assertion_history.iter().any(|f| {
+                        let typed = self.resolve_expr_types(f);
+                        crate::eval::holds(&typed, &model, &funs) == crate::eval::Verdict::False
+                    });
+                let lemmas = if satisfied {
+                    Vec::new()
+                } else {
+                    self.nonlinear_lemmas(&model)
+                };
+                if !lemmas.is_empty() {
+                    nl_rounds += 1;
+                    if nl_rounds > MAX_NL_ROUNDS {
+                        return self.unknown("nonlinear refinement budget exhausted");
+                    }
+                    self.stats.nonlinear_lemmas += lemmas.len() as u64;
+                    for lemma in lemmas {
+                        self.assert_no_track(&lemma);
+                    }
+                    continue;
+                }
             }
 
             // Lazily instantiated array lemmas: add those the current model violates.
@@ -1532,6 +1628,212 @@ impl Rz3Solver {
         lemmas
     }
 
+    /// Make every nonlinear product a plain `x * y` of two variables (partial products and
+    /// non-variable factors get a fresh variable with a defining equation), so the
+    /// monomials can be refined one by one.
+    fn purify_nonlinear(&mut self, expr: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        if matches!(expr, Expr::ForAll(_, _) | Expr::Exists(_, _)) {
+            return expr.clone();
+        }
+        let rebuilt = expr.map_children(&mut |c| self.purify_nonlinear(c, lemmas));
+        let Expr::Mul(args) = &rebuilt else {
+            return rebuilt;
+        };
+        let consts: Vec<Expr> = args
+            .iter()
+            .filter(|a| a.as_constant().is_some())
+            .cloned()
+            .collect();
+        let others: Vec<Expr> = args
+            .iter()
+            .filter(|a| a.as_constant().is_none())
+            .cloned()
+            .collect();
+        if others.len() < 2 {
+            return rebuilt;
+        }
+        if others.len() == 2
+            && consts.is_empty()
+            && others.iter().all(|a| matches!(a, Expr::Var(_, _)))
+        {
+            return rebuilt; // already canonical
+        }
+        let vars: Vec<Expr> = others
+            .iter()
+            .map(|t| self.factor_variable(t, lemmas))
+            .collect();
+        let mut acc = vars[0].clone();
+        for (i, v) in vars.iter().enumerate().skip(1) {
+            let product = Expr::Mul(vec![acc.clone(), v.clone()]);
+            acc = if i + 1 == vars.len() {
+                product
+            } else {
+                self.factor_variable(&product, lemmas)
+            };
+        }
+        if consts.is_empty() {
+            acc
+        } else {
+            let mut parts = consts;
+            parts.push(acc);
+            Expr::Mul(parts)
+        }
+    }
+
+    /// A variable equal to the term `t` (itself when it already is one).
+    fn factor_variable(&mut self, t: &Expr, lemmas: &mut Vec<Expr>) -> Expr {
+        if let Expr::Var(_, _) = t {
+            return t.clone();
+        }
+        if let Some(v) = self.nl_vars.get(t) {
+            return v.clone();
+        }
+        let v = Expr::Var(format!("__nl_{}", self.nl_vars.len()), t.get_type());
+        lemmas.push(Expr::Eq(Box::new(v.clone()), Box::new(t.clone())));
+        self.nl_vars.insert(t.clone(), v.clone());
+        v
+    }
+
+    /// Lemmas that cut off a model in which some `m != x * y` (Cimatti et al., ACM TOCL 2018,
+    /// DOI 10.1145/3230639): sign rules and tangent planes at the model point. All are valid for
+    /// every model of the original problem.
+    fn nonlinear_lemmas(&mut self, model: &BTreeMap<String, ModelValue>) -> Vec<Expr> {
+        use num_traits::Zero;
+        let value = |e: &Expr| -> Option<BigRational> {
+            match crate::eval::eval(e, model)? {
+                crate::eval::Value::Num(r) => Some(r),
+                _ => None,
+            }
+        };
+        let monomials = self.lin.monomials().to_vec();
+        let mut out = Vec::new();
+        let zero = Expr::Int(0);
+        let gt = |a: &Expr, b: &Expr| Expr::Gt(Box::new(a.clone()), Box::new(b.clone()));
+        let lt = |a: &Expr, b: &Expr| Expr::Lt(Box::new(a.clone()), Box::new(b.clone()));
+        let eq = |a: &Expr, b: &Expr| Expr::Eq(Box::new(a.clone()), Box::new(b.clone()));
+        let le = |a: &Expr, b: &Expr| Expr::Le(Box::new(a.clone()), Box::new(b.clone()));
+        let ge = |a: &Expr, b: &Expr| Expr::Ge(Box::new(a.clone()), Box::new(b.clone()));
+        let imp = |p: Expr, q: Expr| Expr::Or(vec![Expr::Not(Box::new(p)), q]);
+        for mono in monomials {
+            let m = Expr::Var(mono.name.clone(), mono.x.get_type());
+            let m = if mono.x.get_type() == Type::Int && mono.y.get_type() == Type::Int {
+                m
+            } else {
+                Expr::Var(mono.name.clone(), Type::Real)
+            };
+            let (Some(vx), Some(vy), Some(vm)) = (value(&mono.x), value(&mono.y), value(&m)) else {
+                continue;
+            };
+            if std::env::var_os("RZ3_QDEBUG").is_some() {
+                eprintln!("NL {}: x={} y={} m={}", mono.name, vx, vy, vm);
+            }
+            if vm == &vx * &vy {
+                continue;
+            }
+            if self.nl_sign_done.insert(mono.name.clone()) {
+                let (x, y) = (&mono.x, &mono.y);
+                out.push(imp(
+                    Expr::And(vec![gt(x, &zero), gt(y, &zero)]),
+                    gt(&m, &zero),
+                ));
+                out.push(imp(
+                    Expr::And(vec![lt(x, &zero), lt(y, &zero)]),
+                    gt(&m, &zero),
+                ));
+                out.push(imp(
+                    Expr::And(vec![gt(x, &zero), lt(y, &zero)]),
+                    lt(&m, &zero),
+                ));
+                out.push(imp(
+                    Expr::And(vec![lt(x, &zero), gt(y, &zero)]),
+                    lt(&m, &zero),
+                ));
+                out.push(imp(eq(x, &zero), eq(&m, &zero)));
+                out.push(imp(eq(y, &zero), eq(&m, &zero)));
+                out.push(imp(
+                    eq(&m, &zero),
+                    Expr::Or(vec![eq(x, &zero), eq(y, &zero)]),
+                ));
+                if x == y {
+                    out.push(ge(&m, &zero));
+                }
+            }
+            // Tangent planes at (a, b): (x-a)(y-b) has the sign dictated by the sides. Points
+            // are rounded to a coarse grid, refined only when the coarse lemma was already used:
+            // tangents at the raw model point square the size of the numbers every round.
+            let (x, y) = (&mono.x, &mono.y);
+            for bits in [4u32, 10, 20, 40, 0] {
+                let (a, b) = if bits == 0 {
+                    (vx.clone(), vy.clone())
+                } else {
+                    (grid_point(&vx, bits), grid_point(&vy, bits))
+                };
+                let (ae, be) = (Expr::from_rational(&a), Expr::from_rational(&b));
+                let plane = Expr::Add(vec![
+                    Expr::Mul(vec![be.clone(), x.clone()]),
+                    Expr::Mul(vec![ae.clone(), y.clone()]),
+                    Expr::from_rational(&-(&a * &b)),
+                ]);
+                let same_side = Expr::Or(vec![
+                    Expr::And(vec![le(x, &ae), le(y, &be)]),
+                    Expr::And(vec![ge(x, &ae), ge(y, &be)]),
+                ]);
+                let opposite = Expr::Or(vec![
+                    Expr::And(vec![le(x, &ae), ge(y, &be)]),
+                    Expr::And(vec![ge(x, &ae), le(y, &be)]),
+                ]);
+                let l1 = imp(same_side, ge(&m, &plane));
+                let l2 = imp(opposite, le(&m, &plane));
+                if self.nl_done.insert(l1.clone()) | self.nl_done.insert(l2.clone()) {
+                    out.push(l1);
+                    out.push(l2);
+                    break;
+                }
+            }
+            // McCormick envelope over the bounds currently asserted on x and y.
+            let (xl, xu) = self.lin.var_bounds(&var_name(x));
+            let (yl, yu) = self.lin.var_bounds(&var_name(y));
+            if let (Some(xl), Some(xu), Some(yl), Some(yu)) = (xl, xu, yl, yu) {
+                let (xl, xu, yl, yu) = (xl.to_big(), xu.to_big(), yl.to_big(), yu.to_big());
+                let k = |q: &BigRational| Expr::from_rational(q);
+                let premise = Expr::And(vec![
+                    ge(x, &k(&xl)),
+                    le(x, &k(&xu)),
+                    ge(y, &k(&yl)),
+                    le(y, &k(&yu)),
+                ]);
+                // m >= lx*y + ly*x - lx*ly and m >= ux*y + uy*x - ux*uy
+                let low1 = Expr::Add(vec![
+                    Expr::Mul(vec![k(&xl), y.clone()]),
+                    Expr::Mul(vec![k(&yl), x.clone()]),
+                    k(&-(&xl * &yl)),
+                ]);
+                let low2 = Expr::Add(vec![
+                    Expr::Mul(vec![k(&xu), y.clone()]),
+                    Expr::Mul(vec![k(&yu), x.clone()]),
+                    k(&-(&xu * &yu)),
+                ]);
+                // m <= ux*y + ly*x - ux*ly and m <= lx*y + uy*x - lx*uy
+                let up1 = Expr::Add(vec![
+                    Expr::Mul(vec![k(&xu), y.clone()]),
+                    Expr::Mul(vec![k(&yl), x.clone()]),
+                    k(&-(&xu * &yl)),
+                ]);
+                let up2 = Expr::Add(vec![
+                    Expr::Mul(vec![k(&xl), y.clone()]),
+                    Expr::Mul(vec![k(&yu), x.clone()]),
+                    k(&-(&xl * &yu)),
+                ]);
+                out.push(imp(premise.clone(), ge(&m, &low1)));
+                out.push(imp(premise.clone(), ge(&m, &low2)));
+                out.push(imp(premise.clone(), le(&m, &up1)));
+                out.push(imp(premise, le(&m, &up2)));
+            }
+            let _ = BigRational::zero();
+        }
+        out
+    }
+
     /// Feed the arrays / strings / floating-point / quantifier / nonlinear / equality
     /// theories the atoms of the current SAT assignment. Nothing runs, and nothing is
     /// cloned, when none of that content is present.
@@ -1572,7 +1874,7 @@ impl Rz3Solver {
                 self.string.assert(&a);
                 self.fp.assert(&a);
             }
-            if expr.has_nonlinear_arith() {
+            if expr.has_unhandled_nonlinear() {
                 self.nla.assert(&a);
             }
         }

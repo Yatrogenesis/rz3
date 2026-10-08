@@ -130,6 +130,15 @@ impl Simplex {
         self.is_int[v as usize]
     }
 
+    /// Current finite bounds of `v` (infinitesimal parts dropped: a strict bound is used as a
+    /// non-strict one, which is weaker and therefore still valid).
+    pub fn bounds(&self, v: u32) -> (Option<Q>, Option<Q>) {
+        (
+            self.lower[v as usize].as_ref().map(|b| b.val.c.clone()),
+            self.upper[v as usize].as_ref().map(|b| b.val.c.clone()),
+        )
+    }
+
     pub fn value(&self, v: u32) -> &D {
         &self.value[v as usize]
     }

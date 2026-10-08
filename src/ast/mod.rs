@@ -208,6 +208,26 @@ impl Expr {
         found
     }
 
+    /// Nonlinear arithmetic the incremental linearization cannot handle: a division by a
+    /// non-constant, or a product that is not a plain `x * y` of two variables.
+    pub fn has_unhandled_nonlinear(&self) -> bool {
+        fn is_const(e: &Expr) -> bool {
+            e.as_constant().is_some()
+        }
+        self.any_subterm(&|e| match e {
+            Expr::Mul(args) => {
+                let non_const: Vec<&Expr> = args.iter().filter(|a| !is_const(a)).collect();
+                // Fine: no product, one factor, or a plain `x * y` of two variables.
+                !matches!(
+                    non_const.as_slice(),
+                    [] | [_] | [Expr::Var(_, _), Expr::Var(_, _)]
+                )
+            }
+            Expr::Div(_, d) => !is_const(d),
+            _ => false,
+        })
+    }
+
     /// Product of two or more non-constant factors, or division by a non-constant.
     pub fn has_nonlinear_arith(&self) -> bool {
         fn is_const(e: &Expr) -> bool {

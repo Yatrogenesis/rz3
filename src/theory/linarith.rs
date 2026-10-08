@@ -11,6 +11,7 @@
 //! bounds rounded, so strict integer inequalities never reach the simplex. Integrality of
 //! the final solution is enforced by the caller through branch-and-bound lemmas.
 
+use super::diff::{DlAtom, DlOp};
 use super::qnum::{D, Q};
 use super::simplex::Simplex;
 use crate::ast::{Expr, Type};
@@ -52,6 +53,14 @@ struct Atom {
     int_row: bool,
 }
 
+/// A product `x * y` of two variables, abstracted to the variable `name`.
+#[derive(Clone, Debug)]
+pub struct Monomial {
+    pub name: String,
+    pub x: Expr,
+    pub y: Expr,
+}
+
 pub struct LinArith {
     sx: Simplex,
     var_ids: HashMap<String, u32>,
@@ -77,6 +86,9 @@ pub struct LinArith {
     pub abstracted: bool,
     /// A product of non-constants was abstracted (the NLA theory must decide it).
     pub nonlinear: bool,
+    last_dl: Option<DlAtom>,
+    monomials: Vec<Monomial>,
+    monomial_ids: HashMap<(String, String), String>,
 }
 
 impl Default for LinArith {
@@ -134,7 +146,26 @@ impl LinArith {
             time_ns: 0,
             abstracted: false,
             nonlinear: false,
+            last_dl: None,
+            monomials: Vec::new(),
+            monomial_ids: HashMap::new(),
         }
+    }
+
+    /// Current bounds of a named variable under the asserted atoms.
+    pub fn var_bounds(&self, name: &str) -> (Option<Q>, Option<Q>) {
+        match self.var_ids.get(name) {
+            Some(&id) => self.sx.bounds(id),
+            None => (None, None),
+        }
+    }
+
+    pub fn monomials(&self) -> &[Monomial] {
+        &self.monomials
+    }
+
+    pub fn num_atoms(&self) -> usize {
+        self.atoms.len()
     }
 
     pub fn pivots(&self) -> u64 {
@@ -229,6 +260,32 @@ impl LinArith {
                 match rest.as_slice() {
                     [] => *cst = cst.add(&scale.mul(&factor)),
                     [only] => self.extract(only, &scale.mul(&factor), acc, cst),
+                    [Expr::Var(xn, xt), Expr::Var(yn, yt)] if rest.len() == 2 => {
+                        // A plain product of two variables: a named monomial the solver
+                        // refines with lemmas (incremental linearization).
+                        let key = if xn <= yn {
+                            (xn.clone(), yn.clone())
+                        } else {
+                            (yn.clone(), xn.clone())
+                        };
+                        let both_int = *xt == Type::Int && *yt == Type::Int;
+                        let name = match self.monomial_ids.get(&key) {
+                            Some(n) => n.clone(),
+                            None => {
+                                let n = format!("__mul_{}", self.monomials.len());
+                                self.monomial_ids.insert(key, n.clone());
+                                self.monomials.push(Monomial {
+                                    name: n.clone(),
+                                    x: Expr::Var(xn.clone(), xt.clone()),
+                                    y: Expr::Var(yn.clone(), yt.clone()),
+                                });
+                                n
+                            }
+                        };
+                        let id = self.user_var(&name, both_int);
+                        let slot = acc.entry(id).or_insert_with(Q::zero);
+                        *slot = slot.add(&scale.mul(&factor));
+                    }
                     _ => {
                         self.nonlinear = true;
                         let id = self.abstract_var(format!("{e:?}"));
@@ -275,6 +332,7 @@ impl LinArith {
         let mut bound = cst.neg();
         let mut op = op;
 
+        self.last_dl = None;
         if poly.is_empty() {
             self.push_atom(Atom {
                 lit,
@@ -332,6 +390,26 @@ impl LinArith {
                 Op::Eq => {}
             }
         }
+        // Difference-logic shape (`u - v op c` or `u op c`) for the accelerator.
+        let shape = match poly.as_slice() {
+            [(u, c)] if *c == Q::one() => Some((*u, None)),
+            [(u, c1), (v, c2)] if *c1 == Q::one() && *c2 == Q::from_i64(-1) => Some((*u, Some(*v))),
+            _ => None,
+        };
+        self.last_dl = shape.map(|(u, v)| DlAtom {
+            lit,
+            u,
+            v,
+            op: match op {
+                Op::Le => DlOp::Le,
+                Op::Lt => DlOp::Lt,
+                Op::Ge => DlOp::Ge,
+                Op::Gt => DlOp::Gt,
+                Op::Eq => DlOp::Eq,
+            },
+            bound: bound.clone(),
+            int_row,
+        });
         self.push_atom(Atom {
             lit,
             var,
@@ -340,6 +418,11 @@ impl LinArith {
             int_row,
         });
         true
+    }
+
+    /// The difference-logic form of the atom registered last, if it has one.
+    pub fn take_dl(&mut self) -> Option<DlAtom> {
+        self.last_dl.take()
     }
 
     fn push_atom(&mut self, atom: Atom) {

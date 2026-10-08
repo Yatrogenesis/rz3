@@ -1,6 +1,3 @@
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap};
-
 pub type Literal = i32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -13,27 +10,32 @@ struct Watch {
 }
 
 pub struct ClauseArena {
+    /// Per clause: `[header, lbd, activity, lit_0, lit_1, ...]`.
     data: Vec<i32>,
-    /// Mapeo de ID -> (Actividad, LBD)
-    metadata: BTreeMap<usize, (u64, usize)>,
+    /// Indices of learnt clauses (may contain deleted ones until the next reduction).
+    learned: Vec<usize>,
 }
+
+const CLAUSE_PREFIX: usize = 3;
 
 impl ClauseArena {
     fn new() -> Self {
         Self {
             data: Vec::with_capacity(1024),
-            metadata: BTreeMap::new(),
+            learned: Vec::new(),
         }
     }
 
     fn push(&mut self, lits: &[Literal], learned: bool, lbd: usize) -> ClauseIdx {
         let idx = self.data.len();
-        // Header: (longitud << 2) | (borrada << 1) | (aprendida)
-        let header = ((lits.len() as i32) << 2) | (if learned { 1 } else { 0 });
+        // Header: (length << 2) | (deleted << 1) | learned
+        let header = ((lits.len() as i32) << 2) | i32::from(learned);
         self.data.push(header);
+        self.data.push(lbd.min(i32::MAX as usize) as i32);
+        self.data.push(0);
         self.data.extend_from_slice(lits);
         if learned {
-            self.metadata.insert(idx, (0, lbd));
+            self.learned.push(idx);
         }
         ClauseIdx(idx)
     }
@@ -47,10 +49,18 @@ impl ClauseArena {
         self.data[idx.0] |= 2;
     }
     #[inline]
-    fn bump_activity(&mut self, idx: ClauseIdx, inc: u64) {
-        if let Some(meta) = self.metadata.get_mut(&idx.0) {
-            meta.0 = meta.0.saturating_add(inc);
+    fn bump_activity(&mut self, idx: ClauseIdx, inc: i32) {
+        if (self.data[idx.0] & 1) != 0 {
+            self.data[idx.0 + 2] = self.data[idx.0 + 2].saturating_add(inc);
         }
+    }
+    #[inline]
+    fn lbd(&self, idx: ClauseIdx) -> i32 {
+        self.data[idx.0 + 1]
+    }
+    #[inline]
+    fn activity(&self, idx: ClauseIdx) -> i32 {
+        self.data[idx.0 + 2]
     }
     #[inline]
     fn get_len(&self, idx: ClauseIdx) -> usize {
@@ -59,11 +69,11 @@ impl ClauseArena {
     #[inline]
     fn get_lits_mut(&mut self, idx: ClauseIdx) -> &mut [Literal] {
         let len = self.get_len(idx);
-        &mut self.data[idx.0 + 1..idx.0 + 1 + len]
+        &mut self.data[idx.0 + CLAUSE_PREFIX..idx.0 + CLAUSE_PREFIX + len]
     }
     #[inline]
     fn get_lit(&self, idx: ClauseIdx, i: usize) -> Literal {
-        self.data[idx.0 + 1 + i]
+        self.data[idx.0 + CLAUSE_PREFIX + i]
     }
 }
 
@@ -74,23 +84,114 @@ pub enum Assignment {
     Unassigned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Activity {
-    score: u64,
-    var: usize,
+/// Decision order: a binary max-heap over variable activity with positions, so a bump
+/// moves the variable up in place (no duplicate entries). Ties go to the lower index, which
+/// keeps the search deterministic.
+struct VarOrder {
+    heap: Vec<u32>,
+    pos: Vec<i32>,
+    act: Vec<f64>,
+    inc: f64,
 }
-impl Ord for Activity {
-    // Determinismo explícito: en empate de score, desempatar por índice de variable
-    // (orden total), sin depender de la estructura interna del heap. [Fase 3]
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.score
-            .cmp(&other.score)
-            .then_with(|| self.var.cmp(&other.var))
+
+impl VarOrder {
+    fn new() -> Self {
+        Self {
+            heap: Vec::new(),
+            pos: Vec::new(),
+            act: Vec::new(),
+            inc: 1.0,
+        }
     }
-}
-impl PartialOrd for Activity {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+
+    fn grow(&mut self, n: usize) {
+        while self.pos.len() < n {
+            self.pos.push(-1);
+            self.act.push(0.0);
+        }
+    }
+
+    #[inline]
+    fn before(&self, a: u32, b: u32) -> bool {
+        let (x, y) = (self.act[a as usize], self.act[b as usize]);
+        x > y || (x == y && a < b)
+    }
+
+    fn up(&mut self, mut i: usize) {
+        let v = self.heap[i];
+        while i > 0 {
+            let parent = (i - 1) / 2;
+            if self.before(v, self.heap[parent]) {
+                self.heap[i] = self.heap[parent];
+                self.pos[self.heap[i] as usize] = i as i32;
+                i = parent;
+            } else {
+                break;
+            }
+        }
+        self.heap[i] = v;
+        self.pos[v as usize] = i as i32;
+    }
+
+    fn down(&mut self, mut i: usize) {
+        let v = self.heap[i];
+        let n = self.heap.len();
+        loop {
+            let mut child = 2 * i + 1;
+            if child >= n {
+                break;
+            }
+            if child + 1 < n && self.before(self.heap[child + 1], self.heap[child]) {
+                child += 1;
+            }
+            if self.before(self.heap[child], v) {
+                self.heap[i] = self.heap[child];
+                self.pos[self.heap[i] as usize] = i as i32;
+                i = child;
+            } else {
+                break;
+            }
+        }
+        self.heap[i] = v;
+        self.pos[v as usize] = i as i32;
+    }
+
+    fn insert(&mut self, var: usize) {
+        if self.pos[var] >= 0 {
+            return;
+        }
+        self.pos[var] = self.heap.len() as i32;
+        self.heap.push(var as u32);
+        self.up(self.heap.len() - 1);
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        let top = *self.heap.first()?;
+        self.pos[top as usize] = -1;
+        let last = self.heap.pop()?;
+        if !self.heap.is_empty() {
+            self.heap[0] = last;
+            self.pos[last as usize] = 0;
+            self.down(0);
+        }
+        Some(top as usize)
+    }
+
+    fn bump(&mut self, var: usize) {
+        self.act[var] += self.inc;
+        if self.act[var] > 1e100 {
+            for a in self.act.iter_mut() {
+                *a *= 1e-100;
+            }
+            self.inc *= 1e-100;
+        }
+        if self.pos[var] >= 0 {
+            self.up(self.pos[var] as usize);
+        }
+    }
+
+    fn decay(&mut self) {
+        self.inc /= 0.95;
     }
 }
 
@@ -144,10 +245,8 @@ pub struct CdclSolver {
     trail_lim: Vec<usize>,
     qhead: usize,
     current_level: usize,
-    scores: Vec<u64>,
     phases: Vec<Assignment>,
-    activity_heap: BinaryHeap<Activity>,
-    score_inc: u64,
+    order: VarOrder,
     /// Scratch marks for conflict analysis (kept allocated; cleared after each use).
     seen: Vec<bool>,
     /// Trail literals below this index have been announced to the theory.
@@ -203,10 +302,8 @@ impl CdclSolver {
             trail_lim: Vec::new(),
             qhead: 0,
             current_level: 0,
-            scores: Vec::new(),
             phases: Vec::new(),
-            activity_heap: BinaryHeap::new(),
-            score_inc: 1,
+            order: VarOrder::new(),
             seen: Vec::new(),
             th_head: 0,
             hook_dirty: false,
@@ -222,12 +319,12 @@ impl CdclSolver {
             self.assignments.resize(var + 1, Assignment::Unassigned);
             self.levels.resize(var + 1, 0);
             self.reasons.resize(var + 1, None);
-            self.scores.resize(var + 1, 0);
+            self.order.grow(var + 1);
             self.phases.resize(var + 1, Assignment::False);
             self.seen.resize(var + 1, false);
             self.watches.resize((var + 1) * 2 + 2, Vec::new());
-            for i in old_len..=var {
-                self.activity_heap.push(Activity { score: 0, var: i });
+            for i in old_len.max(1)..=var {
+                self.order.insert(i);
             }
         }
     }
@@ -631,17 +728,25 @@ impl CdclSolver {
     }
 
     fn reduce_learned(&mut self) {
-        let mut learned = self
+        let mut learned: Vec<(usize, i32, i32)> = self
             .clauses
-            .metadata
+            .learned
             .iter()
-            .map(|(&idx, &(act, lbd))| (idx, act, lbd))
-            .collect::<Vec<_>>();
-        learned.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
-        let keep_from = learned.len() / 2;
-        for (idx_val, _, lbd) in learned.iter().skip(keep_from) {
+            .filter(|&&i| !self.clauses.is_deleted(ClauseIdx(i)))
+            .map(|&i| {
+                (
+                    i,
+                    self.clauses.lbd(ClauseIdx(i)),
+                    self.clauses.activity(ClauseIdx(i)),
+                )
+            })
+            .collect();
+        // Best first: low LBD, then high activity.
+        learned.sort_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)));
+        let keep = learned.len() / 2;
+        for (idx_val, lbd, _) in learned.iter().skip(keep) {
             let idx = ClauseIdx(*idx_val);
-            if *lbd <= 2 || self.clauses.is_deleted(idx) {
+            if *lbd <= 2 {
                 continue; // keep high-quality clauses
             }
             // A clause that is currently the reason of an assignment must stay.
@@ -651,13 +756,20 @@ impl CdclSolver {
             });
             if !locked {
                 self.clauses.mark_deleted(idx);
-                self.clauses.metadata.remove(idx_val);
             }
         }
+        let arena = &self.clauses;
+        let alive: Vec<usize> = arena
+            .learned
+            .iter()
+            .copied()
+            .filter(|&i| !arena.is_deleted(ClauseIdx(i)))
+            .collect();
+        self.clauses.learned = alive;
     }
 
     fn pick_branching_variable(&mut self) -> Option<usize> {
-        while let Some(Activity { score: _, var }) = self.activity_heap.pop() {
+        while let Some(var) = self.order.pop() {
             if var != 0 && self.assignments[var] == Assignment::Unassigned {
                 return Some(var);
             }
@@ -666,23 +778,11 @@ impl CdclSolver {
     }
 
     fn decay_scores(&mut self) {
-        self.score_inc = self.score_inc.saturating_mul(105).saturating_add(99) / 100;
-        self.score_inc = self.score_inc.max(1);
+        self.order.decay();
     }
 
     fn bump_score(&mut self, var: usize) {
-        self.scores[var] = self.scores[var].saturating_add(self.score_inc);
-        self.activity_heap.push(Activity {
-            score: self.scores[var],
-            var,
-        });
-        if self.scores[var] > 1_000_000_000_000_000_000 {
-            for (i, s) in self.scores.iter_mut().enumerate() {
-                *s /= 1_000_000;
-                self.activity_heap.push(Activity { score: *s, var: i });
-            }
-            self.score_inc = (self.score_inc / 1_000_000).max(1);
-        }
+        self.order.bump(var);
     }
 
     /// Unwind the trail to `level` and tell the theory.
@@ -702,13 +802,9 @@ impl CdclSolver {
                 self.assignments[var] = Assignment::Unassigned;
                 self.reasons[var] = None;
                 self.levels[var] = 0;
-                // `pick_branching_variable` discards assigned variables from the heap;
-                // an unassigned one must be selectable again or `solve` would stop with
+                // An unassigned variable must be selectable again or `solve` would stop with
                 // free variables and report a satisfying assignment that is not one.
-                self.activity_heap.push(Activity {
-                    score: self.scores[var],
-                    var,
-                });
+                self.order.insert(var);
             }
             self.trail.truncate(start);
             self.current_level -= 1;

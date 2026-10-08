@@ -131,6 +131,14 @@ fn print_stats(solver: &Rz3Solver) {
         st.sat.restarts,
         st.sat.learned_clauses
     );
+    eprintln!(
+        "stats: lin_ms={:.1} dl_ms={:.1} (repair {:.1}, search {:.1}) dl_propagations={}",
+        ms(st.lin_ns),
+        ms(st.dl_ns),
+        ms(st.dl_repair_ns),
+        ms(st.dl_search_ns),
+        st.dl_propagations
+    );
     if let Some(why) = st.unknown_reason {
         eprintln!("stats: unknown_reason={why}");
     }
@@ -201,18 +209,36 @@ fn format_model_sort(value: &ModelValue) -> String {
 fn format_model_value(value: &ModelValue) -> String {
     match value {
         ModelValue::Bool(value) => value.to_string(),
-        ModelValue::Int(value) => value.to_string(),
+        ModelValue::Int(value) => format_integer(value),
         ModelValue::Real(value) => format_rational(value),
         ModelValue::BitVec(value, width) => format!("#b{:0width$b}", value, width = *width),
         ModelValue::Float(value) => format_float(value),
     }
 }
 
+/// SMT-LIB real constants: non-negative decimals, `(/ n.0 d.0)` for fractions, and
+/// `(- t)` for negatives (a negative numeral literal is not standard syntax).
 fn format_rational(value: &BigRational) -> String {
-    if value.denom() == &BigInt::from(1) {
-        value.numer().to_string()
+    use num_traits::Signed;
+    let abs = value.abs();
+    let body = if abs.denom() == &BigInt::from(1) {
+        format!("{}.0", abs.numer())
     } else {
-        format!("(/ {} {})", value.numer(), value.denom())
+        format!("(/ {}.0 {}.0)", abs.numer(), abs.denom())
+    };
+    if value.is_negative() {
+        format!("(- {body})")
+    } else {
+        body
+    }
+}
+
+fn format_integer(value: &BigInt) -> String {
+    use num_traits::Signed;
+    if value.is_negative() {
+        format!("(- {})", value.abs())
+    } else {
+        value.to_string()
     }
 }
 
