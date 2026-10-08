@@ -2,9 +2,12 @@ pub mod array;
 pub mod bv;
 pub mod euf;
 pub mod fp;
+pub mod linarith;
 pub mod lra;
 pub mod nla;
+pub mod qnum;
 pub mod quantifier;
+pub mod simplex;
 pub mod string;
 
 pub use crate::ast::fp::{FloatSort, FloatValue, RoundingMode};

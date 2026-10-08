@@ -36,6 +36,12 @@ fn real_main() {
     };
     let mut parser = Parser::strict(&input);
     let mut solver = Rz3Solver::new();
+    if let Some(ms) = env::var("RZ3_DEADLINE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        solver.set_time_limit(std::time::Duration::from_millis(ms));
+    }
 
     let mut printed_check_sat = false;
     let mut last_result = None;
@@ -91,6 +97,33 @@ fn real_main() {
 
     if !printed_check_sat {
         print_result(solver.check());
+    }
+    print_stats(&solver);
+}
+
+/// Phase breakdown on stderr when `RZ3_STATS` is set (never mixed into the answer).
+fn print_stats(solver: &Rz3Solver) {
+    if env::var_os("RZ3_STATS").is_none() {
+        return;
+    }
+    let st = solver.stats();
+    let ms = |ns: u128| ns as f64 / 1e6;
+    eprintln!(
+        "stats: assert_ms={:.1} sat_ms={:.1} theory_ms={:.1} certify_ms={:.1} check_calls={} dpll_iterations={} theory_conflicts={} branches={} pivots={} atoms={} sat_vars={}",
+        ms(st.assert_ns),
+        ms(st.sat_ns),
+        ms(st.theory_ns),
+        ms(st.certify_ns),
+        st.check_calls,
+        st.dpll_iterations,
+        st.theory_conflicts,
+        st.branches,
+        st.pivots,
+        st.atoms,
+        st.sat_vars
+    );
+    if let Some(why) = st.unknown_reason {
+        eprintln!("stats: unknown_reason={why}");
     }
 }
 

@@ -94,6 +94,46 @@ impl PartialOrd for Activity {
     }
 }
 
+/// Callbacks that let a theory take part in the search (DPLL(T)).
+///
+/// The SAT core owns the trail. It announces every decision level it opens
+/// ([`TheoryHook::new_level`]) and every level it abandons ([`TheoryHook::backtrack`]),
+/// forwards each literal that becomes true ([`TheoryHook::assign`]) and, at every
+/// propagation fixpoint, asks the theory whether the assignment is still consistent
+/// ([`TheoryHook::check`]). A conflict is a clause whose literals are all currently false.
+pub trait TheoryHook {
+    fn new_level(&mut self);
+    /// Forget everything asserted above decision level `level`.
+    fn backtrack(&mut self, level: usize);
+    fn assign(&mut self, lit: Literal) -> Result<(), Vec<Literal>>;
+    /// Theory consequences: `(implied literal, reason clause)` where the reason clause
+    /// contains the implied literal and is otherwise false. Or a conflict clause.
+    #[allow(clippy::type_complexity)]
+    fn check(&mut self) -> Result<Vec<(Literal, Vec<Literal>)>, Vec<Literal>>;
+}
+
+/// The trivial theory: pure SAT.
+pub struct NoTheory;
+
+impl TheoryHook for NoTheory {
+    fn new_level(&mut self) {}
+    fn backtrack(&mut self, _level: usize) {}
+    fn assign(&mut self, _lit: Literal) -> Result<(), Vec<Literal>> {
+        Ok(())
+    }
+    fn check(&mut self) -> Result<Vec<(Literal, Vec<Literal>)>, Vec<Literal>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveStatus {
+    Sat,
+    Unsat,
+    /// Stopped by the deadline; the instance is undecided.
+    Interrupted,
+}
+
 pub struct CdclSolver {
     clauses: ClauseArena,
     watches: Vec<Vec<Watch>>,
@@ -108,6 +148,13 @@ pub struct CdclSolver {
     phases: Vec<Assignment>,
     activity_heap: BinaryHeap<Activity>,
     score_inc: u64,
+    /// Scratch marks for conflict analysis (kept allocated; cleared after each use).
+    seen: Vec<bool>,
+    /// Trail literals below this index have been announced to the theory.
+    th_head: usize,
+    /// The solver was unwound outside `solve_with`, so the theory must be re-synchronised.
+    hook_dirty: bool,
+    restarts: u64,
     pub ok: bool,
 }
 
@@ -115,6 +162,22 @@ impl Default for CdclSolver {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn luby(mut i: u64) -> u64 {
+    // 1,1,2,1,1,2,4,1,1,2,1,1,2,4,8,...
+    let mut size = 1u64;
+    let mut seq = 0u32;
+    while size < i + 1 {
+        seq += 1;
+        size = 2 * size + 1;
+    }
+    while size - 1 != i {
+        size = (size - 1) >> 1;
+        seq -= 1;
+        i %= size;
+    }
+    1u64 << seq
 }
 
 impl CdclSolver {
@@ -133,6 +196,10 @@ impl CdclSolver {
             phases: Vec::new(),
             activity_heap: BinaryHeap::new(),
             score_inc: 1,
+            seen: Vec::new(),
+            th_head: 0,
+            hook_dirty: false,
+            restarts: 0,
             ok: true,
         }
     }
@@ -145,6 +212,7 @@ impl CdclSolver {
             self.reasons.resize(var + 1, None);
             self.scores.resize(var + 1, 0);
             self.phases.resize(var + 1, Assignment::False);
+            self.seen.resize(var + 1, false);
             self.watches.resize((var + 1) * 2 + 2, Vec::new());
             for i in old_len..=var {
                 self.activity_heap.push(Activity { score: 0, var: i });
@@ -165,6 +233,9 @@ impl CdclSolver {
     /// a clause (or a unit) on top of that left watches on already-false literals and
     /// let units contradict stale assignments, which produced spurious unsat/sat.
     pub fn add_clause(&mut self, lits: Vec<Literal>) -> Option<ClauseIdx> {
+        if self.current_level > 0 {
+            self.hook_dirty = true;
+        }
         self.backtrack(0);
         self.add_clause_inner(lits)
     }
@@ -208,15 +279,12 @@ impl CdclSolver {
             self.assign(lits[0], 0, None);
             return None;
         }
+        let clause_idx = self.clauses.push(&lits, false, 0);
+        self.watch_clause(clause_idx);
+        Some(clause_idx)
+    }
 
-        let learned = self.current_level > 0;
-        let lbd = if learned {
-            self.calculate_lbd(&lits)
-        } else {
-            0
-        };
-        let clause_idx = self.clauses.push(&lits, learned, lbd);
-
+    fn watch_clause(&mut self, clause_idx: ClauseIdx) {
         let lit0 = self.clauses.get_lit(clause_idx, 0);
         let lit1 = self.clauses.get_lit(clause_idx, 1);
         let idx0 = self.lit_to_idx(-lit0);
@@ -229,17 +297,15 @@ impl CdclSolver {
             blocker: lit0,
             idx: clause_idx,
         });
-        Some(clause_idx)
     }
 
     fn calculate_lbd(&self, lits: &[Literal]) -> usize {
-        let mut lvls = Vec::new();
-        for &l in lits {
-            let lvl = self.levels[l.unsigned_abs() as usize];
-            if !lvls.contains(&lvl) {
-                lvls.push(lvl);
-            }
-        }
+        let mut lvls: Vec<usize> = lits
+            .iter()
+            .map(|&l| self.levels[l.unsigned_abs() as usize])
+            .collect();
+        lvls.sort_unstable();
+        lvls.dedup();
         lvls.len()
     }
 
@@ -317,69 +383,207 @@ impl CdclSolver {
         Ok(())
     }
 
+    /// Pure SAT solving (no theory).
     pub fn solve(&mut self) -> bool {
-        if !self.ok {
-            return false;
-        }
-        let mut conflict_count = 0;
-        self.backtrack(0);
+        self.solve_with(&mut NoTheory, None) == SolveStatus::Sat
+    }
 
-        if self.unit_propagate().is_err() {
-            self.ok = false;
-            return false;
+    /// CDCL search with a theory consulted at every propagation fixpoint.
+    pub fn solve_with(
+        &mut self,
+        th: &mut dyn TheoryHook,
+        deadline: Option<std::time::Instant>,
+    ) -> SolveStatus {
+        if !self.ok {
+            return SolveStatus::Unsat;
         }
+        if self.hook_dirty {
+            th.backtrack(0);
+            self.hook_dirty = false;
+        }
+        self.backtrack_with(0, th);
+
+        let mut conflicts_this_restart = 0u64;
+        let mut restart_limit = 100 * luby(self.restarts);
+        let mut conflicts_total = 0u64;
         loop {
-            if let Err(conflict_idx) = self.unit_propagate() {
-                conflict_count += 1;
-                if self.current_level == 0 {
-                    self.ok = false;
-                    return false;
+            if !self.ok {
+                return SolveStatus::Unsat;
+            }
+            // 1. Boolean propagation, then the theory, until nothing new happens.
+            let mut conflict: Option<ConflictSource> = match self.unit_propagate() {
+                Err(idx) => Some(ConflictSource::Clause(idx)),
+                Ok(()) => None,
+            };
+            if conflict.is_none() {
+                conflict = self.sync_theory(th);
+                if conflict.is_none() && self.qhead < self.trail.len() {
+                    continue; // theory propagations to process
                 }
-                if conflict_count % 1000 == 0 {
-                    self.reduce_learned();
-                }
-                let (learnt_lits, backtrack_level) = self.analyze_conflict(conflict_idx);
-                self.decay_scores();
-                self.backtrack(backtrack_level);
-                let learnt_lits = self.order_learnt(learnt_lits);
-                if let Some(learnt_idx) = self.add_learnt(learnt_lits) {
-                    if let Some(unit_lit) = self.check_unit_clause(learnt_idx) {
-                        self.assign(unit_lit, self.current_level, Some(learnt_idx));
+            }
+            if let Some(c) = conflict {
+                conflicts_total += 1;
+                conflicts_this_restart += 1;
+                if let Some(d) = deadline {
+                    if conflicts_total % 64 == 0 && std::time::Instant::now() > d {
+                        return SolveStatus::Interrupted;
                     }
+                }
+                if !self.resolve_conflict(c, th) {
+                    return SolveStatus::Unsat;
+                }
+                if conflicts_total % 2000 == 0 {
+                    self.reduce_learned();
                 }
                 continue;
             }
-            if let Some(var) = self.pick_branching_variable() {
-                self.current_level += 1;
-                self.trail_lim.push(self.trail.len());
-                let lit = if self.phases[var] == Assignment::True {
-                    var as i32
-                } else {
-                    -(var as i32)
-                };
-                self.assign(lit, self.current_level, None);
-            } else {
-                return true;
+            // 2. Restart?
+            if conflicts_this_restart >= restart_limit {
+                self.restarts += 1;
+                restart_limit = 100 * luby(self.restarts);
+                conflicts_this_restart = 0;
+                self.backtrack_with(0, th);
+                continue;
+            }
+            // 3. Decide.
+            match self.pick_branching_variable() {
+                Some(var) => {
+                    self.current_level += 1;
+                    self.trail_lim.push(self.trail.len());
+                    th.new_level();
+                    let lit = if self.phases[var] == Assignment::True {
+                        var as i32
+                    } else {
+                        -(var as i32)
+                    };
+                    self.assign(lit, self.current_level, None);
+                }
+                None => {
+                    if let Some(d) = deadline {
+                        if std::time::Instant::now() > d {
+                            return SolveStatus::Interrupted;
+                        }
+                    }
+                    return SolveStatus::Sat;
+                }
             }
         }
     }
 
-    fn check_unit_clause(&self, idx: ClauseIdx) -> Option<Literal> {
-        let mut unassigned = None;
-        for i in 0..self.clauses.get_len(idx) {
-            let lit = self.clauses.get_lit(idx, i);
-            match self.get_lit_value(lit) {
-                Assignment::True => return None,
-                Assignment::Unassigned => {
-                    if unassigned.is_some() {
-                        return None;
-                    }
-                    unassigned = Some(lit);
-                }
-                Assignment::False => {}
+    /// Announce new trail literals to the theory and run its consistency check.
+    fn sync_theory(&mut self, th: &mut dyn TheoryHook) -> Option<ConflictSource> {
+        let mut announced = false;
+        while self.th_head < self.trail.len() {
+            let lit = self.trail[self.th_head];
+            self.th_head += 1;
+            announced = true;
+            if let Err(clause) = th.assign(lit) {
+                return Some(ConflictSource::Lits(clause));
             }
         }
-        unassigned
+        if !announced {
+            return None;
+        }
+        match th.check() {
+            Err(clause) => Some(ConflictSource::Lits(clause)),
+            Ok(implied) => {
+                for (lit, reason) in implied {
+                    match self.get_lit_value(lit) {
+                        Assignment::True => {}
+                        Assignment::False => {
+                            // The reason clause is falsified: a conflict.
+                            return Some(ConflictSource::Lits(reason));
+                        }
+                        Assignment::Unassigned => {
+                            let mut clause = reason;
+                            // implied literal first, as the analysis expects of reasons
+                            if let Some(pos) = clause.iter().position(|&l| l == lit) {
+                                clause.swap(0, pos);
+                            }
+                            if clause.len() >= 2 {
+                                let lbd = self.calculate_lbd(&clause);
+                                let idx = self.clauses.push(&clause, true, lbd);
+                                // Not watched: it only serves as the reason of this propagation.
+                                self.assign(lit, self.current_level, Some(idx));
+                            } else {
+                                self.assign(lit, self.current_level, None);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Learn from a conflict and backjump. `false` means the instance is unsatisfiable.
+    fn resolve_conflict(&mut self, source: ConflictSource, th: &mut dyn TheoryHook) -> bool {
+        let confl = match source {
+            ConflictSource::Clause(idx) => idx,
+            ConflictSource::Lits(mut lits) => {
+                lits.sort_unstable();
+                lits.dedup();
+                for &l in &lits {
+                    self.ensure_var(l.unsigned_abs() as usize);
+                }
+                if lits
+                    .iter()
+                    .any(|&l| self.get_lit_value(l) != Assignment::False)
+                {
+                    // The theory reported a clause that is not falsified: ignore it
+                    // rather than corrupt the search (it would signal a theory bug).
+                    return self.ok;
+                }
+                let level_of = |s: &Self, l: Literal| s.levels[l.unsigned_abs() as usize];
+                let max_level = lits.iter().map(|&l| level_of(self, l)).max().unwrap_or(0);
+                if lits.is_empty() || max_level == 0 {
+                    self.ok = false;
+                    return false;
+                }
+                if max_level < self.current_level {
+                    self.backtrack_with(max_level, th);
+                }
+                // Order: highest-level literals first (the watch scheme needs two of them).
+                lits.sort_by_key(|&l| std::cmp::Reverse(level_of(self, l)));
+                let at_max = lits
+                    .iter()
+                    .filter(|&&l| level_of(self, l) == max_level)
+                    .count();
+                let lbd = self.calculate_lbd(&lits);
+                if lits.len() == 1 {
+                    self.backtrack_with(0, th);
+                    self.assign(lits[0], 0, None);
+                    return self.ok;
+                }
+                let idx = self.clauses.push(&lits, true, lbd);
+                self.watch_clause(idx);
+                if at_max == 1 {
+                    // Asserting after backjumping to the second-highest level.
+                    let second = level_of(self, lits[1]);
+                    self.backtrack_with(second, th);
+                    let asserting = lits[0];
+                    self.assign(asserting, self.current_level, Some(idx));
+                    return self.ok;
+                }
+                idx
+            }
+        };
+        if self.current_level == 0 {
+            self.ok = false;
+            return false;
+        }
+        let (learnt, backtrack_level) = self.analyze(confl);
+        self.decay_scores();
+        self.backtrack_with(backtrack_level, th);
+        if learnt.len() == 1 {
+            self.assign(learnt[0], 0, None);
+        } else {
+            let lbd = self.calculate_lbd(&learnt);
+            let idx = self.clauses.push(&learnt, true, lbd);
+            self.watch_clause(idx);
+            self.assign(learnt[0], self.current_level, Some(idx));
+        }
+        self.ok
     }
 
     pub fn get_lit_value(&self, lit: Literal) -> Assignment {
@@ -407,13 +611,18 @@ impl CdclSolver {
             .map(|(&idx, &(act, lbd))| (idx, act, lbd))
             .collect::<Vec<_>>();
         learned.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.cmp(&b.1)));
-        for (idx_val, _, lbd) in learned.iter().take(learned.len() / 2) {
+        let keep_from = learned.len() / 2;
+        for (idx_val, _, lbd) in learned.iter().skip(keep_from) {
             let idx = ClauseIdx(*idx_val);
-            if *lbd <= 2 {
-                continue;
-            } // Keep high-quality clauses
-            let var = self.clauses.get_lit(idx, 0).unsigned_abs() as usize;
-            if self.reasons[var] != Some(idx) {
+            if *lbd <= 2 || self.clauses.is_deleted(idx) {
+                continue; // keep high-quality clauses
+            }
+            // A clause that is currently the reason of an assignment must stay.
+            let locked = (0..self.clauses.get_len(idx)).any(|i| {
+                let var = self.clauses.get_lit(idx, i).unsigned_abs() as usize;
+                self.reasons[var] == Some(idx)
+            });
+            if !locked {
                 self.clauses.mark_deleted(idx);
                 self.clauses.metadata.remove(idx_val);
             }
@@ -422,7 +631,7 @@ impl CdclSolver {
 
     fn pick_branching_variable(&mut self) -> Option<usize> {
         while let Some(Activity { score: _, var }) = self.activity_heap.pop() {
-            if self.assignments[var] == Assignment::Unassigned {
+            if var != 0 && self.assignments[var] == Assignment::Unassigned {
                 return Some(var);
             }
         }
@@ -449,6 +658,14 @@ impl CdclSolver {
         }
     }
 
+    /// Unwind the trail to `level` and tell the theory.
+    fn backtrack_with(&mut self, level: usize, th: &mut dyn TheoryHook) {
+        if self.current_level > level {
+            self.backtrack(level);
+            th.backtrack(level);
+        }
+    }
+
     fn backtrack(&mut self, level: usize) {
         while self.current_level > level {
             let start = self.trail_lim.pop().unwrap();
@@ -472,106 +689,103 @@ impl CdclSolver {
         // Literals still on the trail below the target level were fully propagated, but
         // units appended at level 0 since the last propagation may not have been.
         self.qhead = self.qhead.min(self.trail.len());
+        self.th_head = self.th_head.min(self.trail.len());
     }
 
-    /// Put the asserting literal (the one added last by `analyze_conflict`) first and the
-    /// literal with the highest remaining level second, as the watch scheme requires.
-    fn order_learnt(&self, mut lits: Vec<Literal>) -> Vec<Literal> {
-        lits.dedup();
-        if lits.len() >= 2 {
-            let last = lits.len() - 1;
-            lits.swap(0, last);
+    /// 1-UIP conflict analysis with local clause minimisation. Returns the learnt clause
+    /// (asserting literal first, highest remaining level second) and the backjump level.
+    fn analyze(&mut self, conflict_idx: ClauseIdx) -> (Vec<Literal>, usize) {
+        let mut learnt: Vec<Literal> = vec![0];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut path = 0usize;
+        let mut index = self.trail.len();
+        let mut current = conflict_idx;
+        let mut implied: Option<Literal> = None;
+        loop {
+            self.clauses.bump_activity(current, 1);
+            for i in 0..self.clauses.get_len(current) {
+                let q = self.clauses.get_lit(current, i);
+                if Some(q) == implied {
+                    continue;
+                }
+                let var = q.unsigned_abs() as usize;
+                if !self.seen[var] && self.levels[var] > 0 {
+                    self.seen[var] = true;
+                    touched.push(var);
+                    self.bump_score(var);
+                    if self.levels[var] >= self.current_level {
+                        path += 1;
+                    } else {
+                        learnt.push(q);
+                    }
+                }
+            }
+            // Next literal of the current level to resolve on.
+            loop {
+                index -= 1;
+                if self.seen[self.trail[index].unsigned_abs() as usize] {
+                    break;
+                }
+            }
+            let p = self.trail[index];
+            let var = p.unsigned_abs() as usize;
+            self.seen[var] = false;
+            path -= 1;
+            if path == 0 {
+                learnt[0] = -p;
+                break;
+            }
+            match self.reasons[var] {
+                Some(reason) => {
+                    current = reason;
+                    implied = Some(p);
+                }
+                None => {
+                    // A decision with other current-level literals pending cannot happen
+                    // in a correct trail; stop with what we have rather than loop.
+                    learnt[0] = -p;
+                    break;
+                }
+            }
+        }
+        // Local minimisation: drop a literal whose reason is made of marked/level-0 literals.
+        let mut kept = vec![learnt[0]];
+        for &q in &learnt[1..] {
+            let var = q.unsigned_abs() as usize;
+            let redundant = match self.reasons[var] {
+                None => false,
+                Some(r) => (0..self.clauses.get_len(r)).all(|i| {
+                    let l = self.clauses.get_lit(r, i);
+                    let v = l.unsigned_abs() as usize;
+                    v == var || self.seen[v] || self.levels[v] == 0
+                }),
+            };
+            if !redundant {
+                kept.push(q);
+            }
+        }
+        for var in touched {
+            self.seen[var] = false;
+        }
+        // Second literal: highest level among the rest (watch invariant).
+        let mut backtrack_level = 0;
+        if kept.len() > 1 {
             let mut best = 1;
-            for i in 2..lits.len() {
-                if self.levels[lits[i].unsigned_abs() as usize]
-                    > self.levels[lits[best].unsigned_abs() as usize]
+            for i in 1..kept.len() {
+                if self.levels[kept[i].unsigned_abs() as usize]
+                    > self.levels[kept[best].unsigned_abs() as usize]
                 {
                     best = i;
                 }
             }
-            lits.swap(1, best);
+            kept.swap(1, best);
+            backtrack_level = self.levels[kept[1].unsigned_abs() as usize];
         }
-        lits
+        (kept, backtrack_level)
     }
+}
 
-    /// Add a clause learnt during search (current level > 0 is expected).
-    fn add_learnt(&mut self, lits: Vec<Literal>) -> Option<ClauseIdx> {
-        if !self.ok {
-            return None;
-        }
-        if lits.is_empty() {
-            self.ok = false;
-            return None;
-        }
-        for &lit in &lits {
-            self.ensure_var(lit.unsigned_abs() as usize);
-        }
-        if lits.len() == 1 {
-            self.assign(lits[0], 0, None);
-            return None;
-        }
-        let lbd = self.calculate_lbd(&lits);
-        let clause_idx = self.clauses.push(&lits, true, lbd);
-        let lit0 = self.clauses.get_lit(clause_idx, 0);
-        let lit1 = self.clauses.get_lit(clause_idx, 1);
-        let idx0 = self.lit_to_idx(-lit0);
-        let idx1 = self.lit_to_idx(-lit1);
-        self.watches[idx0].push(Watch {
-            blocker: lit1,
-            idx: clause_idx,
-        });
-        self.watches[idx1].push(Watch {
-            blocker: lit0,
-            idx: clause_idx,
-        });
-        Some(clause_idx)
-    }
-
-    fn analyze_conflict(&mut self, conflict_idx: ClauseIdx) -> (Vec<Literal>, usize) {
-        let mut learnt_lits = Vec::new();
-        let mut seen = vec![false; self.assignments.len()];
-        let mut counter = 0;
-        let mut p = self.trail.len() as isize - 1;
-        let mut current = conflict_idx;
-        loop {
-            self.clauses.bump_activity(current, 1);
-            for i in 0..self.clauses.get_len(current) {
-                let var = self.clauses.get_lit(current, i).unsigned_abs() as usize;
-                if !seen[var] && self.levels[var] > 0 {
-                    seen[var] = true;
-                    self.bump_score(var);
-                    if self.levels[var] >= self.current_level {
-                        counter += 1;
-                    } else {
-                        learnt_lits.push(self.clauses.get_lit(current, i));
-                    }
-                }
-            }
-            while p >= 0 && !seen[self.trail[p as usize].unsigned_abs() as usize] {
-                p -= 1;
-            }
-            if counter <= 1 || p < 0 {
-                break;
-            }
-            let last_var = self.trail[p as usize].unsigned_abs() as usize;
-            seen[last_var] = false;
-            counter -= 1;
-            if let Some(reason) = self.reasons[last_var] {
-                current = reason;
-            } else {
-                break;
-            }
-            p -= 1;
-        }
-        if p >= 0 {
-            learnt_lits.push(-self.trail[p as usize]);
-        }
-        let backtrack_level = learnt_lits
-            .iter()
-            .map(|&l| self.levels[l.unsigned_abs() as usize])
-            .filter(|&lvl| lvl < self.current_level)
-            .max()
-            .unwrap_or(0);
-        (learnt_lits, backtrack_level)
-    }
+enum ConflictSource {
+    Clause(ClauseIdx),
+    Lits(Vec<Literal>),
 }

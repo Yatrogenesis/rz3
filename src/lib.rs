@@ -40,12 +40,22 @@ use crate::ast::{Expr, ModelValue, Type};
 use crate::sat::CdclSolver;
 use crate::tactic::{Simplifier, SolveEqs, TacticEngine};
 use crate::theory::fp::FpSolver;
+use crate::theory::linarith::LinArith;
 use crate::theory::{
-    ArraySolver, EufSolver, LraSolver, NlaSolver, QuantifierSolver, StringSolver, TheorySolver,
+    ArraySolver, EufSolver, NlaSolver, QuantifierSolver, StringSolver, TheorySolver,
 };
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use std::collections::BTreeMap;
+
+/// Outcome of the generic (array / string / fp / quantifier / nonlinear / equality) theories.
+enum OtherTheories {
+    Consistent,
+    Unknown,
+    /// A conflict clause (or blocking clause) was added; search again.
+    Refuted,
+    Unsat,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverResult {
@@ -54,7 +64,31 @@ pub enum SolverResult {
     Unknown,
 }
 
+/// Phase counters, for profiling and for reporting how a run spent its time.
+/// Printed by the CLI when `RZ3_STATS` is set. Times are wall-clock nanoseconds.
+#[derive(Debug, Default, Clone)]
+pub struct Stats {
+    pub assert_ns: u128,
+    pub sat_ns: u128,
+    pub theory_ns: u128,
+    pub certify_ns: u128,
+    pub lin_ns: u128,
+    pub propagations: u64,
+    pub check_calls: u64,
+    pub dpll_iterations: u64,
+    pub theory_conflicts: u64,
+    pub branches: u64,
+    pub pivots: u64,
+    /// Why the last `check()` answered `Unknown`, if it did.
+    pub unknown_reason: Option<&'static str>,
+    pub atoms: usize,
+    pub sat_vars: i32,
+}
+
 pub struct Rz3Solver {
+    stats: Stats,
+    /// Optional wall-clock deadline: `check()` answers `Unknown` once it passes.
+    deadline: Option<std::time::Instant>,
     sat_solver: CdclSolver,
     expr_to_lit: BTreeMap<Expr, i32>,
     lit_to_expr: BTreeMap<i32, Expr>,
@@ -64,7 +98,12 @@ pub struct Rz3Solver {
     symbol_table: BTreeMap<String, Type>,
     tactic_engine: TacticEngine,
 
-    lra: LraSolver,
+    lin: LinArith,
+    /// Comparison atoms with nonlinear content (decided or declined by the NLA theory).
+    nla_atoms: Vec<(Expr, i32)>,
+    /// Array / string / floating-point / quantifier content is present, so the generic
+    /// per-atom theories must be fed on every iteration.
+    slow: bool,
     euf: EufSolver,
     array: ArraySolver,
     quant: QuantifierSolver,
@@ -111,7 +150,9 @@ impl Rz3Solver {
             next_sat_var: 1,
             symbol_table: BTreeMap::new(),
             tactic_engine,
-            lra: LraSolver::new(),
+            lin: LinArith::new(),
+            nla_atoms: Vec::new(),
+            slow: false,
             euf: EufSolver::new(),
             array: ArraySolver::new(),
             quant: QuantifierSolver::new(),
@@ -121,11 +162,26 @@ impl Rz3Solver {
             proof_gen: crate::proof::Proof::new(),
             assertion_history: Vec::new(),
             scope_stack: Vec::new(),
+            stats: Stats::default(),
+            deadline: None,
             incomplete: false,
             app_vars: BTreeMap::new(),
             app_by_fn: BTreeMap::new(),
             processed: Vec::new(),
         }
+    }
+
+    /// Make `check()` give up (answering `Unknown`) after `limit` of wall-clock time.
+    pub fn set_time_limit(&mut self, limit: std::time::Duration) {
+        self.deadline = Some(std::time::Instant::now() + limit);
+    }
+
+    /// Phase counters accumulated so far.
+    pub fn stats(&self) -> Stats {
+        let mut st = self.stats.clone();
+        st.atoms = self.expr_to_lit.len();
+        st.sat_vars = self.next_sat_var;
+        st
     }
 
     /// Save current assertion context. Paired with pop().
@@ -157,7 +213,9 @@ impl Rz3Solver {
         te.add_tactic(Box::new(Simplifier));
         te.add_tactic(Box::new(SolveEqs));
         self.tactic_engine = te;
-        self.lra = LraSolver::new();
+        self.lin = LinArith::new();
+        self.nla_atoms = Vec::new();
+        self.slow = false;
         self.euf = EufSolver::new();
         self.array = ArraySolver::new();
         self.quant = QuantifierSolver::new();
@@ -180,6 +238,12 @@ impl Rz3Solver {
     }
 
     fn assert_no_track(&mut self, expr: &Expr) {
+        let started = std::time::Instant::now();
+        self.assert_no_track_inner(expr);
+        self.stats.assert_ns += started.elapsed().as_nanos();
+    }
+
+    fn assert_no_track_inner(&mut self, expr: &Expr) {
         let typed = self.resolve_expr_types(expr);
         let typed = self.lift_ite(&typed);
         let mut lemmas = Vec::new();
@@ -197,7 +261,9 @@ impl Rz3Solver {
             return;
         }
         self.processed.push(simplified.clone());
-        self.lra.assert(&simplified);
+        if Self::needs_generic_theories(&simplified) {
+            self.slow = true;
+        }
         self.euf.assert(&simplified);
         self.array.assert(&simplified);
         self.quant.assert(&simplified);
@@ -583,7 +649,7 @@ impl Rz3Solver {
         }
 
         // Real/Int variables from LRA simplex assignments
-        for (name, val) in self.lra.get_all_assignments() {
+        for (name, val) in self.lin.assignments() {
             model
                 .entry(name.clone())
                 .or_insert_with(|| match self.symbol_table.get(&name) {
@@ -603,9 +669,24 @@ impl Rz3Solver {
         if let Expr::Var(name, _) = &typed {
             return self.get_model().get(name).cloned();
         }
+        let model = self.get_model();
+        if let Some(v) = crate::eval::eval(&typed, &model) {
+            match v {
+                crate::eval::Value::Bool(b) => return Some(ModelValue::Bool(b)),
+                crate::eval::Value::Num(r) => {
+                    return Some(
+                        if r.is_integer() && matches!(self.infer_type(&typed), Some(Type::Int)) {
+                            ModelValue::Int(r.to_integer())
+                        } else {
+                            ModelValue::Real(r)
+                        },
+                    )
+                }
+                crate::eval::Value::Bv(v, w) => return Some(ModelValue::BitVec(v, w)),
+            }
+        }
         self.fp
             .get_model_value(&typed)
-            .or_else(|| self.lra.get_model_value(&typed))
             .or_else(|| self.euf.get_model_value(&typed))
             .or_else(|| self.array.get_model_value(&typed))
             .or_else(|| self.string.get_model_value(&typed))
@@ -637,8 +718,54 @@ impl Rz3Solver {
             self.next_sat_var += 1;
             self.expr_to_lit.insert(expr.clone(), lit);
             self.lit_to_expr.insert(lit, expr.clone());
+            if self.is_arith_atom(expr) {
+                self.lin.register(lit, expr);
+                if expr.has_nonlinear_arith() {
+                    self.nla_atoms.push((expr.clone(), lit));
+                }
+            } else if let Expr::Eq(a, _) = expr {
+                // Equalities over Boolean or bit-vector terms are fully encoded in the SAT
+                // core. Any other equality needs congruence closure.
+                if !matches!(
+                    self.infer_type(a),
+                    Some(Type::Bool | Type::BitVec(_) | Type::Int | Type::Real)
+                ) {
+                    self.slow = true;
+                }
+            }
             lit
         }
+    }
+
+    /// A comparison between numbers (as opposed to Boolean, bit-vector or sort equalities).
+    fn is_arith_atom(&self, expr: &Expr) -> bool {
+        let numeric = |e: &Expr| {
+            matches!(self.infer_type(e), Some(Type::Int | Type::Real))
+                || matches!(e, Expr::Int(_) | Expr::Real(_, _) | Expr::BigRat(_, _))
+        };
+        match expr {
+            Expr::Le(_, _) | Expr::Lt(_, _) | Expr::Ge(_, _) | Expr::Gt(_, _) => true,
+            Expr::Eq(a, b) => numeric(a) || numeric(b),
+            _ => false,
+        }
+    }
+
+    /// Content that only the generic per-atom theories (arrays, strings, floating point,
+    /// quantifiers) understand.
+    fn needs_generic_theories(expr: &Expr) -> bool {
+        expr.any_subterm(&|e| match e {
+            Expr::Select(_, _)
+            | Expr::Store(_, _, _)
+            | Expr::ForAll(_, _)
+            | Expr::Exists(_, _)
+            | Expr::StrConst(_)
+            | Expr::StrConcat(_)
+            | Expr::StrLen(_)
+            | Expr::StrContains(_, _) => true,
+            Expr::App(name, _) => name == "fp" || name.starts_with("fp."),
+            Expr::Var(_, Type::Float(_)) => true,
+            _ => false,
+        })
     }
 
     fn is_bv(&self, expr: &Expr) -> bool {
@@ -802,43 +929,169 @@ impl Rz3Solver {
         }
     }
 
+    /// Record why a verdict was declined (visible with `RZ3_STATS` / `RZ3_TRACE`).
+    fn unknown(&mut self, why: &'static str) -> SolverResult {
+        self.stats.unknown_reason = Some(why);
+        if std::env::var_os("RZ3_TRACE").is_some() {
+            eprintln!("unknown: {why}");
+        }
+        SolverResult::Unknown
+    }
+
     pub fn check(&mut self) -> SolverResult {
         // Branch-and-bound lemmas added for integer variables in this call.
-        const MAX_BRANCHES: usize = 200;
+        const MAX_BRANCHES: usize = 5000;
         let mut branches = 0usize;
+        self.stats.check_calls += 1;
         loop {
-            if !self.sat_solver.solve() {
-                return SolverResult::Unsat;
+            if self.deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                return self.unknown("time limit");
+            }
+            self.stats.dpll_iterations += 1;
+            let sat_started = std::time::Instant::now();
+            let status = self.sat_solver.solve_with(&mut self.lin, self.deadline);
+            self.stats.sat_ns += sat_started.elapsed().as_nanos();
+            self.stats.pivots = self.lin.pivots();
+            self.stats.theory_conflicts = self.lin.conflicts;
+            self.stats.lin_ns = self.lin.time_ns;
+            match status {
+                crate::sat::SolveStatus::Unsat => return SolverResult::Unsat,
+                crate::sat::SolveStatus::Interrupted => return self.unknown("time limit"),
+                crate::sat::SolveStatus::Sat => {}
+            }
+            let theory_started = std::time::Instant::now();
+
+            // ---- the other theories, only when their content is present
+            match self.check_other_theories() {
+                OtherTheories::Consistent => {}
+                OtherTheories::Unknown => {
+                    self.stats.theory_ns += theory_started.elapsed().as_nanos();
+                    return self.unknown("other theories undecided (string/nonlinear)");
+                }
+                OtherTheories::Refuted => {
+                    self.stats.theory_ns += theory_started.elapsed().as_nanos();
+                    continue;
+                }
+                OtherTheories::Unsat => return SolverResult::Unsat,
+            }
+            self.stats.theory_ns += theory_started.elapsed().as_nanos();
+
+            // The simplex works over the rationals. An `Int` variable with a fractional
+            // value is not a model: split on it (branch and bound).
+            if let Some((name, floor)) = self.lin.fractional_int() {
+                branches += 1;
+                self.stats.branches += 1;
+                if branches > MAX_BRANCHES {
+                    return self.unknown("integer branching budget exhausted");
+                }
+                let Some(low) = num_traits::ToPrimitive::to_i64(&floor.to_big().to_integer())
+                else {
+                    return self.unknown("integer branch bound out of range");
+                };
+                let Some(high) = low.checked_add(1) else {
+                    return self.unknown("integer branch bound overflow");
+                };
+                let x = Expr::Var(name, Type::Int);
+                self.assert(&Expr::Or(vec![
+                    Expr::Le(Box::new(x.clone()), Box::new(Expr::Int(low))),
+                    Expr::Ge(Box::new(x), Box::new(Expr::Int(high))),
+                ]));
+                continue;
             }
 
-            self.lra.reset();
-            self.euf.reset();
-            self.array.reset();
-            self.quant.reset();
-            self.string.reset();
-            self.nla.reset();
-            self.fp.reset();
+            let (array_lemmas, quant_lemmas, string_lemmas) = if self.slow {
+                let model = self.get_model();
+                (
+                    self.array.generate_lemmas(),
+                    self.quant.generate_lemmas(&mut self.euf, &model),
+                    self.string.generate_lemmas(),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+            if !(array_lemmas.is_empty() && quant_lemmas.is_empty() && string_lemmas.is_empty()) {
+                for lemma in array_lemmas
+                    .into_iter()
+                    .chain(quant_lemmas)
+                    .chain(string_lemmas)
+                {
+                    self.assert(&lemma);
+                }
+                continue;
+            }
+            // A live universally-quantified assertion can never be CERTIFIED sat by finite
+            // E-matching/MBQI instantiation: reaching a lemma fixpoint means "no counterexample
+            // among the ground terms explored", not "true for the whole domain" (RZ3-2).
+            if self.slow && self.quant.is_unknown() {
+                return self.unknown("quantifiers incomplete");
+            }
+            // A term was abstracted or never interpreted: Sat is unproven.
+            if self.incomplete || self.lin.abstracted {
+                return self.unknown("abstracted or uninterpreted term");
+            }
+            // Independent certification: the extracted model must satisfy every formula the
+            // theories were given and every formula the user asserted. If it does not, the
+            // verdict is not reported (that would be a wrong Sat); formulas the evaluator
+            // cannot interpret (arrays, strings, floating point, ...) are not judged.
+            let certify_started = std::time::Instant::now();
+            let full_model = self.raw_model();
+            let funs = self.function_table(&full_model);
+            let none = crate::eval::FunTable::new();
+            let violated =
+                self.processed.iter().any(|f| {
+                    crate::eval::holds(f, &full_model, &none) == crate::eval::Verdict::False
+                }) || self.assertion_history.iter().any(|f| {
+                    let typed = self.resolve_expr_types(f);
+                    crate::eval::holds(&typed, &full_model, &funs) == crate::eval::Verdict::False
+                });
+            self.stats.certify_ns += certify_started.elapsed().as_nanos();
+            if violated {
+                if std::env::var_os("RZ3_TRACE").is_some() {
+                    for f in &self.processed {
+                        if crate::eval::holds(f, &full_model, &none) == crate::eval::Verdict::False
+                        {
+                            eprintln!("violated (processed): {f:?}");
+                        }
+                    }
+                    eprintln!("model: {full_model:?}");
+                }
+                return self.unknown("model failed certification");
+            }
+            return SolverResult::Sat;
+        }
+    }
 
-            let assigned_atoms = self
-                .expr_to_lit
-                .iter()
-                .filter_map(|(expr, &lit)| match self.sat_solver.get_lit_value(lit) {
-                    crate::sat::Assignment::True => Some((expr.clone(), true)),
-                    crate::sat::Assignment::False => Some((expr.clone(), false)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+    /// Feed the arrays / strings / floating-point / quantifier / nonlinear / equality
+    /// theories the atoms of the current SAT assignment. Nothing runs, and nothing is
+    /// cloned, when none of that content is present.
+    fn check_other_theories(&mut self) -> OtherTheories {
+        if !self.slow && self.nla_atoms.is_empty() {
+            return OtherTheories::Consistent;
+        }
+        self.euf.reset();
+        self.array.reset();
+        self.quant.reset();
+        self.string.reset();
+        self.nla.reset();
+        self.fp.reset();
 
-            for (expr, is_true) in assigned_atoms {
-                let a = if is_true {
-                    expr.clone()
-                } else {
-                    Expr::Not(Box::new(expr.clone()))
-                };
-                let euf_a = self.euf_assignment_assertion(&expr, is_true);
-
-                self.lra.assert(&a);
-                if let Some(euf_expr) = euf_a {
+        let assigned_atoms = self
+            .expr_to_lit
+            .iter()
+            .filter_map(|(expr, &lit)| match self.sat_solver.get_lit_value(lit) {
+                crate::sat::Assignment::True => Some((expr.clone(), true)),
+                crate::sat::Assignment::False => Some((expr.clone(), false)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (expr, is_true) in assigned_atoms {
+            let a = if is_true {
+                expr.clone()
+            } else {
+                Expr::Not(Box::new(expr.clone()))
+            };
+            if self.slow {
+                if let Some(euf_expr) = self.euf_assignment_assertion(&expr, is_true) {
                     self.euf.assert(&euf_expr);
                 } else {
                     self.euf.assert(&a);
@@ -846,171 +1099,70 @@ impl Rz3Solver {
                 self.array.assert(&a);
                 self.quant.assert(&a);
                 self.string.assert(&a);
-                self.nla.assert(&a);
                 self.fp.assert(&a);
             }
+            if expr.has_nonlinear_arith() {
+                self.nla.assert(&a);
+            }
+        }
 
-            let lra_ok = self.lra.check();
-            if self.lra.is_unknown() {
-                return SolverResult::Unknown;
-            }
-            let euf_ok = self.euf.check();
-            let array_ok = self.array.check();
-            let string_ok = self.string.check();
-            if self.string.is_unknown() {
-                return SolverResult::Unknown;
-            }
-            let nla_ok = self.nla.check();
-            if self.nla.is_unknown() {
-                return SolverResult::Unknown;
-            }
-            let fp_ok = self.fp.check();
+        let euf_ok = self.euf.check();
+        let array_ok = self.array.check();
+        let string_ok = self.string.check();
+        if self.string.is_unknown() {
+            return OtherTheories::Unknown;
+        }
+        let nla_ok = self.nla.check();
+        if self.nla.is_unknown() {
+            return OtherTheories::Unknown;
+        }
+        let fp_ok = self.fp.check();
+        if euf_ok && array_ok && string_ok && nla_ok && fp_ok {
+            return OtherTheories::Consistent;
+        }
 
-            if lra_ok && euf_ok && array_ok && string_ok && nla_ok && fp_ok {
-                // The simplex works over the rationals. An `Int` variable with a
-                // fractional value is not a model: split on it (branch and bound).
-                if let Some((name, value)) = self.lra.non_integral_int_vars().into_iter().next() {
-                    branches += 1;
-                    if branches > MAX_BRANCHES {
-                        return SolverResult::Unknown;
-                    }
-                    let Some(low) = num_traits::ToPrimitive::to_i64(&value.floor().to_integer())
-                    else {
-                        return SolverResult::Unknown;
-                    };
-                    let Some(high) = low.checked_add(1) else {
-                        return SolverResult::Unknown;
-                    };
-                    let x = Expr::Var(name, Type::Int);
-                    self.assert(&Expr::Or(vec![
-                        Expr::Le(Box::new(x.clone()), Box::new(Expr::Int(low))),
-                        Expr::Ge(Box::new(x), Box::new(Expr::Int(high))),
-                    ]));
-                    continue;
-                }
-                let model = self.get_model();
-                let array_lemmas = self.array.generate_lemmas();
-                let quant_lemmas = self.quant.generate_lemmas(&mut self.euf, &model);
-                let string_lemmas = self.string.generate_lemmas();
-                if array_lemmas.is_empty() && quant_lemmas.is_empty() && string_lemmas.is_empty() {
-                    // A live universally-quantified assertion can never be
-                    // CERTIFIED sat by finite E-matching/MBQI instantiation —
-                    // reaching a lemma fixpoint means "no counterexample found
-                    // among the ground terms explored", not "true for the
-                    // whole domain". Decline honestly instead of claiming Sat
-                    // (RZ3-2: `check()` on this theory was `{ true }` and its
-                    // result was never even consulted here).
-                    if self.quant.is_unknown() {
-                        return SolverResult::Unknown;
-                    }
-                    // A term was abstracted or never interpreted: Sat is unproven.
-                    if self.incomplete || self.lra.is_abstracted() {
-                        return SolverResult::Unknown;
-                    }
-                    // Independent certification: the extracted model must satisfy every
-                    // formula the theories were given. If it does not, the verdict is not
-                    // reported (that would be a wrong Sat); formulas the evaluator cannot
-                    // interpret (arrays, strings, floating point, ...) are not judged.
-                    let full_model = self.raw_model();
-                    let funs = self.function_table(&full_model);
-                    // Both layers are checked: what the theories were given (`processed`)
-                    // and what the user asserted (`assertion_history`, typed only), so a
-                    // wrong rewrite in `ite` lifting, Ackermann reduction or the simplifier
-                    // cannot hide behind the formula it produced.
-                    let none = crate::eval::FunTable::new();
-                    let violated = self.processed.iter().any(|f| {
-                        crate::eval::holds(f, &full_model, &none) == crate::eval::Verdict::False
-                    }) || self.assertion_history.iter().any(|f| {
-                        let typed = self.resolve_expr_types(f);
-                        crate::eval::holds(&typed, &full_model, &funs)
-                            == crate::eval::Verdict::False
-                    });
-                    if violated {
-                        return SolverResult::Unknown;
-                    }
-                    return SolverResult::Sat;
-                } else {
-                    for lemma in array_lemmas
-                        .into_iter()
-                        .chain(quant_lemmas)
-                        .chain(string_lemmas)
-                    {
-                        self.assert(&lemma);
-                    }
-                    continue;
-                }
-            } else {
-                let mut explanation_found = false;
-                if !lra_ok {
-                    let conflict = self.lra.explain();
-                    if !conflict.is_empty() {
-                        self.proof_gen
-                            .add_step(crate::proof::ProofStep::TheoryLemma(
-                                conflict.clone(),
-                                "LRA".to_string(),
-                            ));
-                        if self.learn_conflict(&conflict) {
-                            explanation_found = true;
-                        }
-                    }
-                }
-                if !euf_ok {
-                    let conflict = self.euf.explain();
-                    if !conflict.is_empty() {
-                        self.proof_gen
-                            .add_step(crate::proof::ProofStep::TheoryLemma(
-                                conflict.clone(),
-                                "EUF".to_string(),
-                            ));
-                        if self.learn_conflict(&conflict) {
-                            explanation_found = true;
-                        }
-                    }
-                }
-                if !nla_ok {
-                    let conflict = self.nla.explain();
-                    if !conflict.is_empty() {
-                        self.proof_gen
-                            .add_step(crate::proof::ProofStep::TheoryLemma(
-                                conflict.clone(),
-                                "NLA".to_string(),
-                            ));
-                        if self.learn_conflict(&conflict) {
-                            explanation_found = true;
-                        }
-                    }
-                }
-                if !fp_ok {
-                    let conflict = self.fp.explain();
-                    if !conflict.is_empty() {
-                        self.proof_gen
-                            .add_step(crate::proof::ProofStep::TheoryLemma(
-                                conflict.clone(),
-                                "FP".to_string(),
-                            ));
-                        if self.learn_conflict(&conflict) {
-                            explanation_found = true;
-                        }
-                    }
-                }
-
-                if !explanation_found {
-                    let mut clause = Vec::new();
-                    for &lit in self.expr_to_lit.values() {
-                        let val = self.sat_solver.get_lit_value(lit);
-                        if val == crate::sat::Assignment::True {
-                            clause.push(-lit);
-                        } else if val == crate::sat::Assignment::False {
-                            clause.push(lit);
-                        }
-                    }
-                    if !clause.is_empty() {
-                        let _ = self.sat_solver.add_clause(clause);
-                    } else {
-                        return SolverResult::Unsat;
-                    }
+        let mut explanation_found = false;
+        let mut learn = |this: &mut Self, name: &str, conflict: Vec<Expr>| {
+            if !conflict.is_empty() {
+                this.proof_gen
+                    .add_step(crate::proof::ProofStep::TheoryLemma(
+                        conflict.clone(),
+                        name.to_string(),
+                    ));
+                if this.learn_conflict(&conflict) {
+                    explanation_found = true;
                 }
             }
+        };
+        if !euf_ok {
+            let c = self.euf.explain();
+            learn(self, "EUF", c);
+        }
+        if !nla_ok {
+            let c = self.nla.explain();
+            learn(self, "NLA", c);
+        }
+        if !fp_ok {
+            let c = self.fp.explain();
+            learn(self, "FP", c);
+        }
+        if explanation_found {
+            return OtherTheories::Refuted;
+        }
+        // No usable explanation: block exactly this assignment so the search progresses.
+        let mut clause = Vec::new();
+        for &lit in self.expr_to_lit.values() {
+            match self.sat_solver.get_lit_value(lit) {
+                crate::sat::Assignment::True => clause.push(-lit),
+                crate::sat::Assignment::False => clause.push(lit),
+                _ => {}
+            }
+        }
+        if clause.is_empty() {
+            OtherTheories::Unsat
+        } else {
+            let _ = self.sat_solver.add_clause(clause);
+            OtherTheories::Refuted
         }
     }
 
@@ -1024,6 +1176,7 @@ impl Rz3Solver {
     }
 
     fn learn_conflict(&mut self, conflict: &[Expr]) -> bool {
+        self.stats.theory_conflicts += 1;
         if conflict.is_empty() {
             return false;
         }
