@@ -103,6 +103,10 @@ fn text_path_never_weakens_a_formula() {
         ("div zero functional", "(assert (and (= c 0) (= (div a c) 3) (= (div a 0) 4)))", UnsatOrDecline),
         ("mod zero functional", "(assert (and (= (mod a 0) (+ a 1)) (= (mod a 0) a)))", UnsatOrDecline),
         ("real div zero functional", "(assert (and (= y 0.0) (= (/ x y) 1.0) (= (/ x 0.0) 2.0)))", UnsatOrDecline),
+        // let values that are large are named by a fresh constant instead of being copied at each use
+        ("nested lets share", "(assert (let ((u (+ a a a a a a a a a a a a a a a a a a a a a a a a a a))) (let ((w (+ u u u u u u u u u u u u u u u u u u u u u u u u u u u u))) (and (> w 5) (< u 0) (> a 0)))))", Unsat),
+        ("nested lets sat", "(assert (let ((u (+ a a a a a a a a a a a a a a a a a a a a a a a a a a))) (let ((w (+ u u u u u u u u u u u u u u u u u u u u u u u u u u u u))) (and (> w 5) (> a 0)))))", Sat),
+        ("let of uf application", "(assert (let ((u (f (+ a a a a a a a a a a a a a a a a a a a a a a a a a a)))) (and (> u 3) (< u 2))))", Unsat),
         ("mod nonzero range", "(assert (< (mod a 3) 0))", Unsat),
         ("mod by zero is a function", "(assert (and (= (mod a 0) 1) (= (mod a 0) 2)))", Unsat),
         ("let shadowing", "(assert (let ((a 1)) (let ((a 2)) (= a 3))))", Unsat),

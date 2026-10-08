@@ -280,6 +280,14 @@ pub struct Parser<'a> {
     env: Vec<BTreeMap<String, Expr>>,
     injected: Vec<VecDeque<Token>>,
     recording: Option<Vec<Token>>,
+    /// Definitions `(= __let_k value)` introduced for large let-bound values while parsing an
+    /// assertion; they are conjoined with that assertion.
+    let_defs: Vec<Expr>,
+    in_assert: bool,
+    quant_depth: usize,
+    let_counter: usize,
+    /// Result sorts of declared functions (the AST alone cannot type an application).
+    fun_ret: BTreeMap<String, Type>,
 }
 
 impl<'a> Parser<'a> {
@@ -300,6 +308,11 @@ impl<'a> Parser<'a> {
             env: Vec::new(),
             injected: Vec::new(),
             recording: None,
+            let_defs: Vec::new(),
+            in_assert: false,
+            quant_depth: 0,
+            let_counter: 0,
+            fun_ret: BTreeMap::new(),
         }
     }
 
@@ -628,6 +641,7 @@ impl<'a> Parser<'a> {
                         return self.fail(format!("'{name}' is already declared"));
                     }
                     self.funs.insert(name.clone(), params.len());
+                    self.fun_ret.insert(name.clone(), ret.clone());
                 }
                 Command::DeclareFun(name, params, ret)
             }
@@ -683,9 +697,20 @@ impl<'a> Parser<'a> {
                 Command::DefineFun(name, params, ret, body)
             }
             "assert" => {
-                let expr = self.parse_expr()?;
+                self.in_assert = true;
+                self.let_defs.clear();
+                let parsed = self.parse_expr();
+                self.in_assert = false;
+                let expr = parsed?;
                 self.expect_rparen()?;
-                Command::Assert(expr)
+                let defs = std::mem::take(&mut self.let_defs);
+                Command::Assert(if defs.is_empty() {
+                    expr
+                } else {
+                    let mut parts = defs;
+                    parts.push(expr);
+                    Expr::And(parts)
+                })
             }
             "check-sat" => {
                 self.expect_rparen()?;
@@ -981,6 +1006,7 @@ impl<'a> Parser<'a> {
                     let name = self.expect_symbol("a let-bound name")?;
                     let value = self.parse_expr()?;
                     self.expect_rparen()?;
+                    let value = self.share_large_let_value(value);
                     scope.insert(name, value);
                 }
                 _ => return self.fail("malformed let bindings"),
@@ -992,6 +1018,47 @@ impl<'a> Parser<'a> {
         let body = body?;
         self.expect_rparen()?;
         Some(body)
+    }
+
+    /// Substituting a let-bound term at every use duplicates it, which is exponential for nested
+    /// lets (a 118 KB benchmark exhausted 6 GB). A large value is instead named by a fresh
+    /// constant `v` and the definition `v = value` is conjoined with the assertion. This is
+    /// equivalent: `v` is fresh and functionally determined by `value`. It is not done under a
+    /// quantifier (the value may mention bound variables) or outside `assert`.
+    fn share_large_let_value(&mut self, value: Expr) -> Expr {
+        if !self.in_assert || self.quant_depth > 0 {
+            return value;
+        }
+        let nodes = std::cell::Cell::new(0usize);
+        value.any_subterm(&|_| {
+            nodes.set(nodes.get() + 1);
+            nodes.get() > 24
+        });
+        let ty = self.infer_type(&value);
+        if nodes.get() <= 24 || matches!(ty, Type::Unknown | Type::Fn(_, _)) {
+            return value;
+        }
+        let name = format!("__let_{}", self.let_counter);
+        self.let_counter += 1;
+        let var = Expr::Var(name, ty);
+        self.let_defs
+            .push(Expr::Eq(Box::new(var.clone()), Box::new(value)));
+        var
+    }
+
+    /// Type of `e`, also for applications of declared functions and conditionals over them.
+    fn infer_type(&self, e: &Expr) -> Type {
+        match e.get_type() {
+            Type::Unknown => match e {
+                Expr::App(name, _) => self.fun_ret.get(name).cloned().unwrap_or(Type::Unknown),
+                Expr::Ite(_, t, f) => match self.infer_type(t) {
+                    Type::Unknown => self.infer_type(f),
+                    ty => ty,
+                },
+                _ => Type::Unknown,
+            },
+            ty => ty,
+        }
     }
 
     fn parse_quantifier(&mut self, universal: bool) -> Option<Expr> {
@@ -1014,7 +1081,9 @@ impl<'a> Parser<'a> {
             .map(|(n, t)| (n.clone(), Expr::Var(n.clone(), t.clone())))
             .collect();
         self.env.push(scope);
+        self.quant_depth += 1;
         let body = self.parse_expr();
+        self.quant_depth -= 1;
         self.env.pop();
         let body = Box::new(body?);
         self.expect_rparen()?;
