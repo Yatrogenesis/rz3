@@ -832,11 +832,25 @@ impl Rz3Solver {
 
     pub fn get_model(&self) -> BTreeMap<String, ModelValue> {
         let mut model = self.raw_model();
-        model.retain(|name, _| {
-            !(name.starts_with("__ack_")
-                || name.starts_with("__div_")
-                || name.starts_with("__toint_"))
-        });
+        // Hide the solver's own variables (`__ack_`, `__ite_`, `__sel_`, ...): only symbols
+        // the user declared, or ones that are not generated, belong in a model.
+        model.retain(|name, _| self.symbol_table.contains_key(name) || !name.starts_with("__"));
+        // Every declared constant has a value in a model, even one no assertion mentions.
+        for (name, ty) in &self.symbol_table {
+            if model.contains_key(name) {
+                continue;
+            }
+            let default = match ty {
+                Type::Bool => Some(ModelValue::Bool(false)),
+                Type::Int => Some(ModelValue::Int(BigInt::from(0))),
+                Type::Real => Some(ModelValue::Real(BigRational::from_integer(BigInt::from(0)))),
+                Type::BitVec(w) => Some(ModelValue::BitVec(0, *w)),
+                _ => None,
+            };
+            if let Some(v) = default {
+                model.insert(name.clone(), v);
+            }
+        }
         model
     }
 
