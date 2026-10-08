@@ -573,6 +573,24 @@ impl Rz3Solver {
         match &rebuilt {
             Expr::IntDiv(x, c) => self.division_variable(x, c, lemmas),
             Expr::IntMod(x, c) => self.modulo_variable(x, c, lemmas),
+            // Real division by a non-constant: q = x / y  <=>  y = 0 \/ q * y = x. The value at
+            // y = 0 is unspecified in SMT-LIB, so q stays free there.
+            Expr::Div(x, y) if y.as_constant().is_none() => {
+                let key = rebuilt.clone();
+                if let Some(v) = self.def_vars.get(&key) {
+                    return v.clone();
+                }
+                let q = Expr::Var(format!("__rdiv_{}", self.def_vars.len()), Type::Real);
+                lemmas.push(Expr::Or(vec![
+                    Expr::Eq(y.clone(), Box::new(Expr::Int(0))),
+                    Expr::Eq(
+                        Box::new(Expr::Mul(vec![q.clone(), (**y).clone()])),
+                        x.clone(),
+                    ),
+                ]));
+                self.def_vars.insert(key, q.clone());
+                q
+            }
             Expr::ToInt(x) => self.floor_variable(x, lemmas),
             Expr::IsInt(x) => {
                 let q = self.floor_variable(x, lemmas);
@@ -602,7 +620,6 @@ impl Rz3Solver {
         if nonzero_const {
             lemmas.push(definition);
         } else {
-            self.incomplete = true;
             lemmas.push(Expr::Or(vec![
                 Expr::Eq(Box::new(c.clone()), Box::new(Expr::Int(0))),
                 definition,
@@ -643,7 +660,6 @@ impl Rz3Solver {
         if nonzero_const {
             lemmas.push(bounds);
         } else {
-            self.incomplete = true;
             lemmas.push(Expr::Or(vec![
                 Expr::Eq(Box::new(c.clone()), Box::new(Expr::Int(0))),
                 bounds,

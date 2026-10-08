@@ -92,6 +92,12 @@ fn text_path_never_weakens_a_formula() {
         ("bvredand ones", "(assert (= (bvredand #b1111) #b1))", Sat),
         ("bvite", "(assert (= (bvite #b1 #b0011 #b0100) #b0100))", Unsat),
         ("n-ary concat", "(assert (= (concat #b1 #b0 #b1) #b101))", Sat),
+        // division by a variable: valid when the divisor is non-zero, free when it is zero
+        ("div by variable", "(assert (and (> c 0) (= (div a c) 3) (= a 7)))", Sat),
+        ("div by variable unsat", "(assert (and (> c 0) (= (div a c) 3) (= a 2) (>= c 1)))", Unsat),
+        ("mod by variable", "(assert (and (= (mod a c) 2) (= c 3) (= a 8)))", Sat),
+        ("real division by variable", "(assert (and (= (/ x y) 2.0) (= y 3.0) (= x 6.0)))", Sat),
+        ("real division by variable unsat", "(assert (and (= (/ x y) 2.0) (= y 3.0) (= x 7.0)))", Unsat),
         ("mod nonzero range", "(assert (< (mod a 3) 0))", Unsat),
         ("mod by zero is a function", "(assert (and (= (mod a 0) 1) (= (mod a 0) 2)))", Unsat),
         ("let shadowing", "(assert (let ((a 1)) (let ((a 2)) (= a 3))))", Unsat),

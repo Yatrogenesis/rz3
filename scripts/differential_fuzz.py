@@ -28,7 +28,7 @@ class Gen:
         self.incr = False
         if profile == "incr":
             # the incremental driver draws its formulas from one of the other generators
-            self.profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "arr", "arrsort"])
+            self.profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "arr", "arrsort", "quant", "nra", "nia"])
             self.incr = True
 
     # --- terms ---
@@ -332,8 +332,98 @@ class Gen:
             return f"(not {self.arr_formula(d-1)})"
         return f"(=> {self.arr_formula(d-1)} {self.arr_formula(d-1)})"
 
+    # --- quantifiers over Int with an uninterpreted function and predicate ---
+    def q_term(self, d, bound):
+        r = self.r
+        pool = bound + ["a", "b", "0", "1", "2"]
+        if d <= 0 or r.random() < 0.45:
+            return r.choice(pool)
+        k = r.random()
+        if k < 0.35:
+            return f"(f {self.q_term(d-1, bound)})"
+        if k < 0.6:
+            return f"(+ {self.q_term(d-1, bound)} {self.q_term(d-1, bound)})"
+        if k < 0.8:
+            return f"(- {self.q_term(d-1, bound)} {self.q_term(d-1, bound)})"
+        return f"(* {r.randint(-2, 3)} {self.q_term(d-1, bound)})"
+
+    def q_atom(self, d, bound):
+        r = self.r
+        k = r.random()
+        if k < 0.55:
+            op = r.choice(["=", "<", "<=", ">", ">="])
+            return f"({op} {self.q_term(d, bound)} {self.q_term(d, bound)})"
+        if k < 0.8:
+            return f"(pq {self.q_term(d, bound)})"
+        return r.choice(["m", "n"])
+
+    def q_formula(self, d, bound):
+        r = self.r
+        if d <= 0 or r.random() < 0.3:
+            return self.q_atom(1, bound)
+        k = r.random()
+        if k < 0.25:
+            return f"(and {self.q_formula(d-1, bound)} {self.q_formula(d-1, bound)})"
+        if k < 0.45:
+            return f"(or {self.q_formula(d-1, bound)} {self.q_formula(d-1, bound)})"
+        if k < 0.55:
+            return f"(not {self.q_formula(d-1, bound)})"
+        if k < 0.65:
+            return f"(=> {self.q_formula(d-1, bound)} {self.q_formula(d-1, bound)})"
+        v = f"x{len(bound)}"
+        q = r.choice(["forall", "forall", "exists"])
+        return f"({q} (({v} Int)) {self.q_formula(d-1, bound + [v])})"
+
+    # --- nonlinear arithmetic (reals and integers) ---
+    def nl_term(self, d, ints):
+        r = self.r
+        vs = ["i", "j", "k2"] if ints else ["x", "y", "z"]
+        if d <= 0 or r.random() < 0.3:
+            return r.choice(vs + [str(r.randint(-3, 4)) if ints else f"{r.randint(-3, 4)}.0"])
+        k = r.random()
+        if k < 0.35:
+            return f"(* {self.nl_term(d-1, ints)} {self.nl_term(d-1, ints)})"
+        if k < 0.55:
+            return f"(+ {self.nl_term(d-1, ints)} {self.nl_term(d-1, ints)})"
+        if k < 0.7:
+            return f"(- {self.nl_term(d-1, ints)} {self.nl_term(d-1, ints)})"
+        if k < 0.82:
+            c = r.randint(-2, 3)
+            return f"(* {c if ints else str(c) + '.0'} {self.nl_term(d-1, ints)})"
+        if k < 0.93:
+            # division by terms that may be zero or non-constant (unspecified at zero in SMT-LIB)
+            op = r.choice(["div", "mod"]) if ints else "/"
+            return f"({op} {self.nl_term(d-1, ints)} {self.nl_term(d-1, ints)})"
+        return f"(* {r.choice(vs)} {r.choice(vs)})"
+
+    def nl_atom(self, d, ints):
+        op = self.r.choice(["<", "<=", ">", ">=", "="])
+        return f"({op} {self.nl_term(d, ints)} {self.nl_term(d, ints)})"
+
+    def nl_formula(self, d, ints):
+        r = self.r
+        if d <= 0 or r.random() < 0.4:
+            return self.nl_atom(2, ints)
+        k = r.random()
+        if k < 0.5:
+            return f"(and {self.nl_formula(d-1, ints)} {self.nl_formula(d-1, ints)})"
+        if k < 0.85:
+            return f"(or {self.nl_formula(d-1, ints)} {self.nl_formula(d-1, ints)})"
+        return f"(not {self.nl_formula(d-1, ints)})"
+
     def declarations(self):
         lines = ["(set-logic ALL)"]
+        if self.profile in ("nra", "nia"):
+            if self.profile == "nra":
+                lines += [f"(declare-fun {v} () Real)" for v in "xyz"]
+            else:
+                lines += [f"(declare-fun {v} () Int)" for v in ("i", "j", "k2")]
+            return lines
+        if self.profile == "quant":
+            lines += [f"(declare-fun {v} () Int)" for v in "ab"]
+            lines += [f"(declare-fun {v} () Bool)" for v in "mn"]
+            lines += ["(declare-fun f (Int) Int)", "(declare-fun pq (Int) Bool)"]
+            return lines
         if self.profile in ("arr", "arrsort"):
             if self.profile == "arrsort":
                 lines += ["(declare-sort I 0)", "(declare-sort E 0)"]
@@ -361,6 +451,10 @@ class Gen:
         return lines
 
     def one_assertion(self, depth):
+        if self.profile in ("nra", "nia"):
+            return f"(assert {self.nl_formula(depth, self.profile == 'nia')})"
+        if self.profile == "quant":
+            return f"(assert {self.q_formula(depth, [])})"
         if self.profile in ("arr", "arrsort"):
             return f"(assert {self.arr_formula(depth)})"
         if self.profile == "sorts":
@@ -425,7 +519,7 @@ def run(bin_args, path):
 
 def one(i):
     rng = random.Random(SEED * 1_000_003 + i)
-    profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "arr", "arrsort", "incr"])
+    profile = rng.choice(["lia", "lra", "diff", "uf", "bv", "mixed", "bvw", "sorts", "arr", "arrsort", "quant", "nra", "nia", "incr"])
     text = Gen(rng, profile).script()
     path = os.path.join(OUT, f"case_{i}.smt2")
     with open(path, "w") as fh:
