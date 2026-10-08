@@ -497,6 +497,9 @@ impl Rz3Solver {
     /// Without this the arithmetic and bit-vector encoders treated an `ite` term as an
     /// unconstrained fresh variable and reported satisfiable.
     fn lift_ite(&self, expr: &Expr) -> Expr {
+        if !expr.any_subterm(&|e| matches!(e, Expr::Ite(_, _, _))) {
+            return expr.clone();
+        }
         match expr {
             Expr::And(_) | Expr::Or(_) | Expr::Not(_) | Expr::Implies(_, _) => {
                 expr.map_children(&mut |c| self.lift_ite(c))
@@ -543,7 +546,7 @@ impl Rz3Solver {
             if found.is_none() {
                 found = Self::first_ite(c);
             }
-            c.clone()
+            Expr::Bool(true)
         });
         found
     }

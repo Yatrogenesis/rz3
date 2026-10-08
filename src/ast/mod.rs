@@ -201,11 +201,13 @@ impl Expr {
             return true;
         }
         let mut found = false;
+        // The rebuilt node is discarded: returning a leaf keeps this traversal linear in the
+        // term size (returning `c.clone()` would copy every subtree once per level).
         self.map_children(&mut |c| {
             if !found && c.any_subterm(pred) {
                 found = true;
             }
-            c.clone()
+            Expr::Bool(true)
         });
         found
     }
