@@ -114,7 +114,9 @@ impl Expr {
                         _ => None,
                     })
                     .unwrap_or(Type::Unknown),
-                "fp.isNaN" | "fp.isInfinite" | "fp.isZero" => Type::Bool,
+                "fp.isNaN" | "fp.isInfinite" | "fp.isZero" | "fp.isNormal" | "fp.isSubnormal"
+                | "fp.isNegative" | "fp.isPositive" | "fp.eq" | "fp.lt" | "fp.leq" | "fp.gt"
+                | "fp.geq" => Type::Bool,
                 _ => Type::Unknown,
             },
             Expr::App(_, _) => Type::Unknown,

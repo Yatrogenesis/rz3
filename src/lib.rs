@@ -1474,6 +1474,9 @@ impl Rz3Solver {
             if self.slow && self.quant.is_unknown() {
                 return self.unknown("quantifiers incomplete");
             }
+            if self.slow && self.fp.is_unknown() {
+                return self.unknown("floating-point term not evaluable");
+            }
             // A term was abstracted or never interpreted: Sat is unproven.
             if self.incomplete || self.lin.abstracted {
                 return self.unknown("abstracted or uninterpreted term");

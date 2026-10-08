@@ -395,6 +395,18 @@ impl<'a> Parser<'a> {
                 "Bool" => Some(Type::Bool),
                 "Int" => Some(Type::Int),
                 "Real" => Some(Type::Real),
+                "Float16" => Some(Type::Float(FloatSort {
+                    exponent_bits: 5,
+                    significand_bits: 11,
+                })),
+                "Float32" => Some(Type::Float(FloatSort {
+                    exponent_bits: 8,
+                    significand_bits: 24,
+                })),
+                "Float64" => Some(Type::Float(FloatSort {
+                    exponent_bits: 11,
+                    significand_bits: 53,
+                })),
                 other => match self.sorts.get(other) {
                     Some(None) => Some(Type::Sort(other.to_string())),
                     Some(Some(alias)) => Some(alias.clone()),
@@ -713,6 +725,20 @@ impl<'a> Parser<'a> {
         if let Some(e) = self.lookup_local(&s) {
             return Some(e);
         }
+        // Rounding-mode constants are only meaningful as the first argument of fp.* operators.
+        if matches!(
+            s.as_str(),
+            "RNE"
+                | "RTZ"
+                | "RTP"
+                | "RTN"
+                | "roundNearestTiesToEven"
+                | "roundTowardZero"
+                | "roundTowardPositive"
+                | "roundTowardNegative"
+        ) {
+            return Some(Expr::Var(s, Type::Real));
+        }
         if let Some(ty) = self.consts.get(&s) {
             return Some(Expr::Var(s, ty.clone()));
         }
@@ -797,6 +823,38 @@ impl<'a> Parser<'a> {
                 }
                 "_" => {
                     let name = self.expect_symbol("an indexed identifier")?;
+                    if matches!(name.as_str(), "+oo" | "-oo" | "+zero" | "-zero" | "NaN") {
+                        let (Some(Token::Int(e)), Some(Token::Int(sb))) =
+                            (self.next_token(), self.next_token())
+                        else {
+                            return self.fail("malformed floating-point constant");
+                        };
+                        self.expect_rparen()?;
+                        if !(2..=64).contains(&e) || !(2..=65).contains(&sb) {
+                            return self.fail("floating-point format too wide for this front end");
+                        }
+                        let (ebits, fbits) = (e as usize, (sb - 1) as usize);
+                        let ones = if ebits >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << ebits) - 1
+                        };
+                        let (sign, exp, frac) = match name.as_str() {
+                            "+oo" => (0, ones, 0),
+                            "-oo" => (1, ones, 0),
+                            "+zero" => (0, 0, 0),
+                            "-zero" => (1, 0, 0),
+                            _ => (0, ones, 1u64 << (fbits - 1)),
+                        };
+                        return Some(Expr::App(
+                            "fp".to_string(),
+                            vec![
+                                Expr::BvConst(sign, 1),
+                                Expr::BvConst(exp, ebits),
+                                Expr::BvConst(frac, fbits),
+                            ],
+                        ));
+                    }
                     let Some(digits) = name.strip_prefix("bv") else {
                         return self.fail(format!("unsupported indexed identifier '{name}'"));
                     };
