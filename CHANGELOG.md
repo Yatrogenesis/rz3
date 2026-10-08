@@ -11,7 +11,20 @@ Soundness fixes found by a 120-case differential pilot against Z3 5.1.0
 conflict handling, not in the theory algorithms themselves. Behaviour change:
 inputs RZ3 cannot interpret now produce an error or `unknown`, never a verdict.
 
+### Added
+- Incremental linearization for nonlinear real/integer arithmetic (sign, tangent, McCormick
+  and monotonicity lemmas); `sat` only when the exact evaluator confirms the model.
+- Floating point: `Float16/32/64`, `(_ +oo|-oo|+zero|-zero|NaN e s)`, IEEE comparisons,
+  `to_fp` from a real literal or a bit pattern, `fp.min`/`fp.max`; terms that cannot be
+  evaluated (free FP variables) give `unknown`.
+- Models are printed in standard SMT-LIB syntax (`(- 1)`, `1.0`, `(/ 1.0 2.0)`).
+- Regression batteries: strings fail closed (145 scripts cross-checked with Z3), 107+ front-end
+  rows cross-checked with Z3, unit tests for the congruence closure and the fast rationals
+  derived from a mutation run (`cargo-mutants`).
+
 ### Fixed
+- **`div`/`mod` by zero:** `(mod x 0)` was rewritten to `x`, refuting satisfiable problems
+  (found with yinyang/typefuzz). The standard leaves it unspecified; RZ3 now answers `unknown`.
 - **Front end:** operators it did not know (`-`, `distinct`, `=>`, `xor`, every
   `bv*`, ...) were silently turned into uninterpreted applications, so `(- a b)`
   became a free variable. They are now translated; anything unsupported is a
