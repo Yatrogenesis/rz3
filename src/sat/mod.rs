@@ -912,3 +912,116 @@ enum ConflictSource {
     Clause(ClauseIdx),
     Lits(Vec<Literal>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn luby_sequence_matches_the_definition() {
+        // Luby, Sinclair, Zuckerman (1993): 1 1 2 1 1 2 4 1 1 2 1 1 2 4 8 ...
+        let expected = [
+            1u64, 1, 2, 1, 1, 2, 4, 1, 1, 2, 1, 1, 2, 4, 8, 1, 1, 2, 1, 1, 2, 4, 1, 1, 2, 1, 1, 2,
+            4, 8, 16,
+        ];
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(luby(i as u64), *want, "luby({i})");
+        }
+    }
+
+    #[test]
+    fn var_order_pops_by_activity_then_by_index() {
+        let mut o = VarOrder::new();
+        o.grow(6);
+        for v in 1..6 {
+            o.insert(v);
+        }
+        // no activity yet: the lowest index first
+        assert_eq!(o.pop(), Some(1));
+        o.bump(4);
+        o.bump(4);
+        o.bump(3);
+        assert_eq!(o.pop(), Some(4));
+        assert_eq!(o.pop(), Some(3));
+        assert_eq!(o.pop(), Some(2));
+        assert_eq!(o.pop(), Some(5));
+        assert_eq!(o.pop(), None);
+    }
+
+    #[test]
+    fn var_order_bump_moves_a_queued_variable_up_and_reinsert_is_idempotent() {
+        let mut o = VarOrder::new();
+        o.grow(5);
+        for v in 1..5 {
+            o.insert(v);
+            o.insert(v); // a second insert must not duplicate the entry
+        }
+        o.bump(4);
+        assert_eq!(o.pop(), Some(4));
+        o.insert(4);
+        o.bump(2);
+        o.bump(2);
+        assert_eq!(o.pop(), Some(2));
+        assert_eq!(o.pop(), Some(4));
+        assert_eq!(o.pop(), Some(1));
+        assert_eq!(o.pop(), Some(3));
+        assert_eq!(o.pop(), None);
+    }
+
+    #[test]
+    fn var_order_decay_makes_later_bumps_weigh_more() {
+        let mut o = VarOrder::new();
+        o.grow(3);
+        o.insert(1);
+        o.insert(2);
+        o.bump(1); // weight 1
+        o.decay(); // the increment grows
+        o.bump(2); // heavier than the earlier bump of 1
+        assert_eq!(o.pop(), Some(2));
+        assert_eq!(o.pop(), Some(1));
+    }
+
+    #[test]
+    fn var_order_rescales_without_changing_the_order() {
+        let mut o = VarOrder::new();
+        o.grow(4);
+        for v in 1..4 {
+            o.insert(v);
+        }
+        for _ in 0..3000 {
+            o.decay();
+            o.bump(3);
+        }
+        o.bump(2);
+        assert_eq!(o.pop(), Some(3));
+        assert_eq!(o.pop(), Some(2));
+        assert_eq!(o.pop(), Some(1));
+    }
+
+    #[test]
+    fn clause_arena_stores_length_flags_and_metadata() {
+        let mut a = ClauseArena::new();
+        let c1 = a.push(&[1, -2, 3], false, 0);
+        let c2 = a.push(&[4, 5], true, 7);
+        assert_eq!(a.get_len(c1), 3);
+        assert_eq!(a.get_len(c2), 2);
+        assert_eq!(a.get_lit(c1, 1), -2);
+        assert_eq!(a.get_lit(c2, 0), 4);
+        assert_eq!(a.lbd(c2), 7);
+        assert_eq!(a.activity(c2), 0);
+        a.bump_activity(c2, 3);
+        a.bump_activity(c2, 2);
+        assert_eq!(a.activity(c2), 5);
+        // the original clause is not learnt: bumping it does nothing
+        a.bump_activity(c1, 9);
+        assert_eq!(a.activity(c1), 0);
+        assert!(!a.is_deleted(c1));
+        a.mark_deleted(c1);
+        assert!(a.is_deleted(c1));
+        assert!(!a.is_deleted(c2));
+        assert_eq!(a.get_len(c1), 3, "deleting keeps the length readable");
+        a.get_lits_mut(c2)[0] = 9;
+        assert_eq!(a.get_lit(c2, 0), 9);
+        assert_eq!(a.learned, vec![c2.0]);
+    }
+}
