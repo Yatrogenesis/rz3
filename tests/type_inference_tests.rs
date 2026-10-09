@@ -77,7 +77,7 @@ fn declared_bitvec_symbol_is_used_for_parsed_assertions() {
     solver.assert(&expr);
     solver.assert(&Expr::Not(Box::new(Expr::Eq(
         Box::new(Expr::Var("x".to_string(), Type::BitVec(8))),
-        Box::new(Expr::BvConst(1, 8)),
+        Box::new(Expr::bv(1, 8)),
     ))));
 
     assert!(matches!(solver.check(), SolverResult::Unsat));

@@ -6,6 +6,7 @@
 //! uninterpreted symbol. `let` and `define-fun` are expanded here, so the
 //! solver only ever sees the fully interpreted formula.
 
+use num_bigint::BigUint;
 use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,7 +20,7 @@ pub enum Token {
     /// Numeral or decimal that does not fit the machine representations: exact digits
     /// (`123..` or `12.5..`), converted to a rational by the parser.
     BigNum(String),
-    BitVec(u64, usize),
+    BitVec(BigUint, usize),
     String(String),
 }
 
@@ -28,8 +29,9 @@ pub struct Lexer<'a> {
     error: Option<String>,
 }
 
-/// Widest bit-vector literal/sort the front end accepts: values are carried in `u64`.
-pub const MAX_PARSED_BV_WIDTH: usize = 64;
+/// Widest bit-vector literal/sort the front end accepts: the bit-blaster's hard cap
+/// (`theory::bv::MAX_BV_WIDTH`); values are arbitrary-precision `BigUint`.
+pub const MAX_PARSED_BV_WIDTH: usize = crate::theory::bv::MAX_BV_WIDTH;
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
@@ -106,18 +108,18 @@ impl<'a> Lexer<'a> {
             }
             '#' => match self.chars.next() {
                 Some('b') => {
-                    let mut value = 0u64;
+                    let mut digits = String::new();
                     let mut width = 0usize;
                     while let Some(&next) = self.chars.peek() {
                         match next {
                             '0' | '1' => {
                                 if width >= MAX_PARSED_BV_WIDTH {
-                                    self.fail(
-                                        "bit-vector literal wider than 64 bits is unsupported",
-                                    );
+                                    self.fail(format!(
+                                        "bit-vector literal wider than {MAX_PARSED_BV_WIDTH} bits is unsupported"
+                                    ));
                                     return None;
                                 }
-                                value = (value << 1) | u64::from(next == '1');
+                                digits.push(next);
                                 width += 1;
                                 self.chars.next();
                             }
@@ -128,27 +130,35 @@ impl<'a> Lexer<'a> {
                         self.fail("empty #b literal");
                         None
                     } else {
-                        Some(Token::BitVec(value, width))
+                        Some(Token::BitVec(
+                            BigUint::parse_bytes(digits.as_bytes(), 2).unwrap_or_default(),
+                            width,
+                        ))
                     }
                 }
                 Some('x') => {
-                    let mut value = 0u64;
-                    let mut digits = 0usize;
+                    let mut text = String::new();
                     while let Some(&next) = self.chars.peek() {
-                        let Some(d) = next.to_digit(16) else { break };
-                        if digits >= MAX_PARSED_BV_WIDTH / 4 {
-                            self.fail("bit-vector literal wider than 64 bits is unsupported");
+                        if next.to_digit(16).is_none() {
+                            break;
+                        }
+                        if text.len() >= MAX_PARSED_BV_WIDTH / 4 {
+                            self.fail(format!(
+                                "bit-vector literal wider than {MAX_PARSED_BV_WIDTH} bits is unsupported"
+                            ));
                             return None;
                         }
-                        value = (value << 4) | u64::from(d);
-                        digits += 1;
+                        text.push(next);
                         self.chars.next();
                     }
-                    if digits == 0 {
+                    if text.is_empty() {
                         self.fail("empty #x literal");
                         None
                     } else {
-                        Some(Token::BitVec(value, digits * 4))
+                        Some(Token::BitVec(
+                            BigUint::parse_bytes(text.as_bytes(), 16).unwrap_or_default(),
+                            text.len() * 4,
+                        ))
                     }
                 }
                 _ => {
@@ -469,7 +479,9 @@ impl<'a> Parser<'a> {
                     return self.fail("expected a bit-vector width");
                 };
                 if !(1..=MAX_PARSED_BV_WIDTH as i64).contains(&w) {
-                    return self.fail(format!("bit-vector width {w} is unsupported (1..=64)"));
+                    return self.fail(format!(
+                        "bit-vector width {w} is unsupported (1..={MAX_PARSED_BV_WIDTH})"
+                    ));
                 }
                 self.expect_rparen()?;
                 Some(Type::BitVec(w as usize))
@@ -499,7 +511,14 @@ impl<'a> Parser<'a> {
             Some(Token::Int(i)) => i.to_string(),
             Some(Token::Real(i, s)) => format_real_token(i, s),
             Some(Token::BigNum(t)) => t,
-            Some(Token::BitVec(v, w)) => format!("#b{:0width$b}", v, width = w),
+            Some(Token::BitVec(v, w)) => {
+                let d = if v == BigUint::default() {
+                    String::new()
+                } else {
+                    v.to_str_radix(2)
+                };
+                format!("#b{}{}", "0".repeat(w.saturating_sub(d.len())), d)
+            }
             Some(Token::String(s)) => s,
             _ => return self.fail("unsupported attribute value"),
         })
@@ -944,22 +963,27 @@ impl<'a> Parser<'a> {
                         return Some(Expr::App(
                             "fp".to_string(),
                             vec![
-                                Expr::BvConst(sign, 1),
-                                Expr::BvConst(exp, ebits),
-                                Expr::BvConst(frac, fbits),
+                                Expr::bv(sign, 1),
+                                Expr::bv(exp, ebits),
+                                Expr::bv(frac, fbits),
                             ],
                         ));
                     }
                     let Some(digits) = name.strip_prefix("bv") else {
                         return self.fail(format!("unsupported indexed identifier '{name}'"));
                     };
-                    let (Ok(value), Some(Token::Int(width))) =
-                        (digits.parse::<u64>(), self.next_token())
-                    else {
+                    let (Some(value), Some(Token::Int(width))) = (
+                        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                            None
+                        } else {
+                            BigUint::parse_bytes(digits.as_bytes(), 10)
+                        },
+                        self.next_token(),
+                    ) else {
                         return self.fail("malformed (_ bvN w) literal");
                     };
                     if !(1..=MAX_PARSED_BV_WIDTH as i64).contains(&width)
-                        || (width < 64 && value >> width != 0)
+                        || value.bits() > width as u64
                     {
                         return self.fail("bit-vector literal out of range");
                     }
@@ -1348,8 +1372,8 @@ impl<'a> Parser<'a> {
                     "bvxnor" => Expr::BvNot(Box::new(Expr::BvXor(a, b))),
                     _ => Expr::Ite(
                         Box::new(Expr::Eq(a, b)),
-                        Box::new(Expr::BvConst(1, 1)),
-                        Box::new(Expr::BvConst(0, 1)),
+                        Box::new(Expr::bv(1, 1)),
+                        Box::new(Expr::bv(0, 1)),
                     ),
                 })
             }
@@ -1361,7 +1385,7 @@ impl<'a> Parser<'a> {
                     return self.fail("'bvite' needs a 1-bit condition and branches of one width");
                 }
                 Some(Expr::Ite(
-                    Box::new(Expr::Eq(Box::new(c), Box::new(Expr::BvConst(1, 1)))),
+                    Box::new(Expr::Eq(Box::new(c), Box::new(Expr::bv(1, 1)))),
                     Box::new(a),
                     Box::new(b),
                 ))
@@ -1372,22 +1396,19 @@ impl<'a> Parser<'a> {
                 let Type::BitVec(w) = a.get_type() else {
                     return self.fail(format!("'{op}' expects a bit-vector"));
                 };
-                if w > 64 {
-                    return self.fail("bit-vector width is unsupported (> 64)");
-                }
-                let ones = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
+                let ones = (BigUint::from(1u8) << w) - 1u8;
                 let bit = |c: Expr| {
                     Expr::Ite(
                         Box::new(c),
-                        Box::new(Expr::BvConst(1, 1)),
-                        Box::new(Expr::BvConst(0, 1)),
+                        Box::new(Expr::bv(1, 1)),
+                        Box::new(Expr::bv(0, 1)),
                     )
                 };
-                let is = |v: u64| Expr::Eq(Box::new(a.clone()), Box::new(Expr::BvConst(v, w)));
+                let is = |v: BigUint| Expr::Eq(Box::new(a.clone()), Box::new(Expr::BvConst(v, w)));
                 Some(match op {
-                    "bvredor" => bit(Expr::Not(Box::new(is(0)))),
+                    "bvredor" => bit(Expr::Not(Box::new(is(BigUint::default())))),
                     "bvredand" => bit(is(ones)),
-                    _ => is(1u64 << (w - 1)),
+                    _ => is(BigUint::from(1u8) << (w - 1)),
                 })
             }
             "bvuaddo" | "bvsaddo" | "bvusubo" | "bvssubo" | "bvumulo" | "bvsmulo" | "bvsdivo" => {
@@ -1405,8 +1426,10 @@ impl<'a> Parser<'a> {
                 } else {
                     w + 1
                 };
-                if wide > 64 {
-                    return self.fail("bit-vector width is unsupported (> 64)");
+                if wide > MAX_PARSED_BV_WIDTH {
+                    return self.fail(format!(
+                        "bit-vector width is unsupported (> {MAX_PARSED_BV_WIDTH})"
+                    ));
                 }
                 let n = wide - w;
                 let zx = |e: &Expr| Expr::BvZeroExt(n, Box::new(e.clone()));
@@ -1421,7 +1444,7 @@ impl<'a> Parser<'a> {
                             w,
                             Box::new(Expr::BvAdd(Box::new(zx(&a)), Box::new(zx(&b)))),
                         )),
-                        Box::new(Expr::BvConst(1, 1)),
+                        Box::new(Expr::bv(1, 1)),
                     ),
                     "bvsaddo" => ne(
                         Expr::BvAdd(Box::new(sx(&a)), Box::new(sx(&b))),
@@ -1438,7 +1461,7 @@ impl<'a> Parser<'a> {
                             w,
                             Box::new(Expr::BvMul(Box::new(zx(&a)), Box::new(zx(&b)))),
                         ),
-                        Expr::BvConst(0, w),
+                        Expr::bv(0, w),
                     ),
                     "bvsmulo" => ne(
                         Expr::BvMul(Box::new(sx(&a)), Box::new(sx(&b))),
@@ -1446,9 +1469,12 @@ impl<'a> Parser<'a> {
                     ),
                     // signed division overflows only for MIN / -1
                     _ => {
-                        let ones = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
+                        let ones = (BigUint::from(1u8) << w) - 1u8;
                         Expr::And(vec![
-                            Expr::Eq(ba, Box::new(Expr::BvConst(1u64 << (w - 1), w))),
+                            Expr::Eq(
+                                ba,
+                                Box::new(Expr::BvConst(BigUint::from(1u8) << (w - 1), w)),
+                            ),
                             Expr::Eq(bb, Box::new(Expr::BvConst(ones, w))),
                         ])
                     }

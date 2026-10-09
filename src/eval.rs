@@ -7,32 +7,44 @@
 //! `Unknown` instead of being reported.
 
 use crate::ast::{Expr, ModelValue, Type};
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
+use num_integer::Integer;
 use num_rational::BigRational;
-use num_traits::{One, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Bool(bool),
     Num(BigRational),
-    Bv(u64, usize),
+    Bv(BigUint, usize),
 }
 
-fn mask(width: usize) -> u64 {
-    if width >= 64 {
-        u64::MAX
+/// Widest bit-vector the evaluator builds (matches the bit-blaster's cap).
+const MAX_EVAL_BV_WIDTH: usize = crate::theory::bv::MAX_BV_WIDTH;
+
+fn modulus(width: usize) -> BigUint {
+    BigUint::one() << width
+}
+
+fn mask(width: usize) -> BigUint {
+    modulus(width) - 1u8
+}
+
+/// Two's-complement reading of a `width`-bit pattern.
+fn signed(v: &BigUint, width: usize) -> BigInt {
+    if width > 0 && v.bit(width as u64 - 1) {
+        BigInt::from(v.clone()) - BigInt::from(modulus(width))
     } else {
-        (1u64 << width) - 1
+        BigInt::from(v.clone())
     }
 }
 
-fn signed(v: u64, width: usize) -> i128 {
-    if width > 0 && width <= 64 && (v >> (width - 1)) & 1 == 1 {
-        i128::from(v) - (1i128 << width)
-    } else {
-        i128::from(v)
-    }
+/// Two's-complement pattern of `v` reduced modulo 2^width.
+fn from_signed(v: &BigInt, width: usize) -> BigUint {
+    v.mod_floor(&BigInt::from(modulus(width)))
+        .to_biguint()
+        .unwrap_or_default()
 }
 
 fn decimal(mantissa: i64, scale: u32) -> BigRational {
@@ -43,7 +55,7 @@ fn default_value(ty: &Type) -> Option<Value> {
     match ty {
         Type::Bool => Some(Value::Bool(false)),
         Type::Int | Type::Real => Some(Value::Num(BigRational::zero())),
-        Type::BitVec(w) => Some(Value::Bv(0, *w)),
+        Type::BitVec(w) => Some(Value::Bv(BigUint::zero(), *w)),
         _ => None,
     }
 }
@@ -87,15 +99,15 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
         Expr::Int(i) => Some(Value::Num(BigRational::from_integer(BigInt::from(*i)))),
         Expr::Real(m, s) => Some(Value::Num(decimal(*m, *s))),
         Expr::BigRat(_, _) => expr.as_rational().map(Value::Num),
-        Expr::BvConst(v, w) => Some(Value::Bv(*v & mask(*w), *w)),
+        Expr::BvConst(v, w) => Some(Value::Bv(v & mask(*w), *w)),
         Expr::Var(name, ty) => match model.get(name) {
             Some(ModelValue::Bool(b)) => Some(Value::Bool(*b)),
             Some(ModelValue::Int(i)) => Some(Value::Num(BigRational::from_integer(i.clone()))),
             Some(ModelValue::Real(r)) => Some(Value::Num(r.clone())),
             Some(ModelValue::BitVec(v, w)) => match ty {
                 // The model's width is the highest bit seen; trust the declared sort.
-                Type::BitVec(declared) => Some(Value::Bv(*v & mask(*declared), *declared)),
-                _ => Some(Value::Bv(*v, *w)),
+                Type::BitVec(declared) => Some(Value::Bv(v & mask(*declared), *declared)),
+                _ => Some(Value::Bv(v.clone(), *w)),
             },
             Some(ModelValue::Float(_)) => None,
             None => default_value(ty),
@@ -219,17 +231,17 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
             let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;
             };
-            Some(Value::Bv(v.wrapping_neg() & mask(w), w))
+            Some(Value::Bv((modulus(w) - v) & mask(w), w))
         }
         Expr::BvZeroExt(n, a) | Expr::BvSignExt(n, a) => {
             let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;
             };
-            if w + n > 64 {
+            if w + n > MAX_EVAL_BV_WIDTH {
                 return None;
             }
             let extended = if matches!(expr, Expr::BvSignExt(_, _)) {
-                (signed(v, w) as u64) & mask(w + n)
+                from_signed(&signed(&v, w), w + n)
             } else {
                 v
             };
@@ -248,7 +260,7 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
             let rotated = if left == 0 {
                 v
             } else {
-                ((v << left) | (v >> (w - left))) & mask(w)
+                ((&v << left) | (&v >> (w - left))) & mask(w)
             };
             Some(Value::Bv(rotated, w))
         }
@@ -256,12 +268,12 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
             let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;
             };
-            if w * n > 64 || *n == 0 {
+            if w.checked_mul(*n)? > MAX_EVAL_BV_WIDTH || *n == 0 {
                 return None;
             }
-            let mut out = 0u64;
+            let mut out = BigUint::zero();
             for _ in 0..*n {
-                out = (out << w) | v;
+                out = (out << w) | &v;
             }
             Some(Value::Bv(out, w * n))
         }
@@ -278,37 +290,54 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
                 return None;
             }
             let m = mask(w);
-            let (sx, sy) = (signed(x, w), signed(y, w));
+            let (sx, sy) = (signed(&x, w), signed(&y, w));
             let out = match expr {
                 // SMT-LIB: x / 0 is all ones and x % 0 is x.
-                Expr::BvUdiv(_, _) => x.checked_div(y).unwrap_or(m),
-                Expr::BvUrem(_, _) => x.checked_rem(y).unwrap_or(x),
+                Expr::BvUdiv(_, _) => {
+                    if y.is_zero() {
+                        m
+                    } else {
+                        &x / &y
+                    }
+                }
+                Expr::BvUrem(_, _) => {
+                    if y.is_zero() {
+                        x
+                    } else {
+                        &x % &y
+                    }
+                }
                 Expr::BvSdiv(_, _) => {
-                    if y == 0 {
-                        if sx < 0 {
-                            1
+                    if y.is_zero() {
+                        if sx.is_negative() {
+                            BigUint::one()
                         } else {
                             m
                         }
                     } else {
-                        (sx.wrapping_div(sy) as u64) & m
+                        // BigInt division truncates toward zero, as bvsdiv requires
+                        from_signed(&(&sx / &sy), w)
                     }
                 }
                 Expr::BvSrem(_, _) => {
-                    if y == 0 {
+                    if y.is_zero() {
                         x
                     } else {
-                        (sx.wrapping_rem(sy) as u64) & m
+                        from_signed(&(&sx % &sy), w)
                     }
                 }
                 _ => {
                     // bvsmod: result takes the sign of the divisor
-                    if y == 0 {
+                    if y.is_zero() {
                         x
                     } else {
-                        let r = sx.rem_euclid(sy.abs());
-                        let r = if sy < 0 && r != 0 { r + sy } else { r };
-                        (r as u64) & m
+                        let r = sx.mod_floor(&sy.abs());
+                        let r = if sy.is_negative() && !r.is_zero() {
+                            r + &sy
+                        } else {
+                            r
+                        };
+                        from_signed(&r, w)
                     }
                 }
             };
@@ -318,7 +347,7 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
             let Value::Bv(v, w) = ev(a, model, funs)? else {
                 return None;
             };
-            Some(Value::Bv(!v & mask(w), w))
+            Some(Value::Bv(mask(w) ^ v, w))
         }
         Expr::BvExtract(h, l, a) => {
             let Value::Bv(v, w) = ev(a, model, funs)? else {
@@ -328,14 +357,14 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
                 return None;
             }
             let width = h - l + 1;
-            Some(Value::Bv((v >> l) & mask(width), width))
+            Some(Value::Bv((v >> *l) & mask(width), width))
         }
         Expr::BvConcat(a, b) => {
             let (Value::Bv(hi, wh), Value::Bv(lo, wl)) = (ev(a, model, funs)?, ev(b, model, funs)?)
             else {
                 return None;
             };
-            if wh + wl > 64 {
+            if wh + wl > MAX_EVAL_BV_WIDTH {
                 return None;
             }
             Some(Value::Bv((hi << wl) | lo, wh + wl))
@@ -361,25 +390,29 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
                 return None;
             }
             let m = mask(w);
-            let shift = |left: bool, arithmetic: bool| -> u64 {
-                if y >= w as u64 {
-                    if arithmetic && (x >> (w - 1)) & 1 == 1 {
-                        m
+            let shift = |left: bool, arithmetic: bool| -> BigUint {
+                if y >= BigUint::from(w) {
+                    if arithmetic && x.bit(w as u64 - 1) {
+                        m.clone()
                     } else {
-                        0
+                        BigUint::zero()
                     }
-                } else if left {
-                    (x << y) & m
-                } else if arithmetic {
-                    ((signed(x, w) >> y) as u64) & m
                 } else {
-                    x >> y
+                    // y < w here, so it fits a usize
+                    let k = y.to_usize().unwrap_or(w);
+                    if left {
+                        (&x << k) & &m
+                    } else if arithmetic {
+                        from_signed(&(signed(&x, w) >> k), w)
+                    } else {
+                        &x >> k
+                    }
                 }
             };
             Some(match expr {
-                Expr::BvAdd(_, _) => Value::Bv(x.wrapping_add(y) & m, w),
-                Expr::BvSub(_, _) => Value::Bv(x.wrapping_sub(y) & m, w),
-                Expr::BvMul(_, _) => Value::Bv(x.wrapping_mul(y) & m, w),
+                Expr::BvAdd(_, _) => Value::Bv((&x + &y) & &m, w),
+                Expr::BvSub(_, _) => Value::Bv((modulus(w) + &x - &y) & &m, w),
+                Expr::BvMul(_, _) => Value::Bv((&x * &y) & &m, w),
                 Expr::BvAnd(_, _) => Value::Bv(x & y, w),
                 Expr::BvOr(_, _) => Value::Bv(x | y, w),
                 Expr::BvXor(_, _) => Value::Bv(x ^ y, w),
@@ -388,8 +421,8 @@ fn ev(expr: &Expr, model: &BTreeMap<String, ModelValue>, funs: &FunTable) -> Opt
                 Expr::BvAshr(_, _) => Value::Bv(shift(false, true), w),
                 Expr::BvUle(_, _) => Value::Bool(x <= y),
                 Expr::BvUlt(_, _) => Value::Bool(x < y),
-                Expr::BvSle(_, _) => Value::Bool(signed(x, w) <= signed(y, w)),
-                _ => Value::Bool(signed(x, w) < signed(y, w)),
+                Expr::BvSle(_, _) => Value::Bool(signed(&x, w) <= signed(&y, w)),
+                _ => Value::Bool(signed(&x, w) < signed(&y, w)),
             })
         }
         _ => None,

@@ -394,7 +394,7 @@ impl Expr {
 use std::collections::BTreeMap;
 use std::fmt;
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
@@ -428,7 +428,8 @@ pub enum Expr {
     IsInt(Box<Expr>),
     App(String, Vec<Expr>), // Function application
     // Bit-vectors
-    BvConst(u64, usize), // Value and width
+    /// Value (already reduced modulo 2^width by the constructors) and width.
+    BvConst(BigUint, usize),
     BvAdd(Box<Expr>, Box<Expr>),
     BvSub(Box<Expr>, Box<Expr>),
     BvMul(Box<Expr>, Box<Expr>),
@@ -492,9 +493,22 @@ pub enum ModelValue {
     Bool(bool),
     Int(BigInt),
     Real(num_rational::BigRational),
-    BitVec(u64, usize),
+    BitVec(BigUint, usize),
     /// Valor de modelo de punto flotante IEEE-754 exacto (contrato compartido con theory::fp).
     Float(fp::FloatValue),
+}
+
+impl Expr {
+    /// Bit-vector constant from a machine word (reduced modulo 2^width).
+    pub fn bv(value: u64, width: usize) -> Expr {
+        Expr::bv_big(BigUint::from(value), width)
+    }
+
+    /// Bit-vector constant from an arbitrary-precision value (reduced modulo 2^width).
+    pub fn bv_big(value: BigUint, width: usize) -> Expr {
+        let m = (BigUint::from(1u8) << width) - 1u8;
+        Expr::BvConst(value & m, width)
+    }
 }
 
 impl fmt::Display for Expr {

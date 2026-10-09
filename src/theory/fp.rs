@@ -819,7 +819,7 @@ impl FpSolver {
                 match args.as_slice() {
                     // Reinterpretation of an IEEE bit pattern; width must match exactly.
                     [Expr::BvConst(v, w)] if *w == (e + sb) as usize => {
-                        FloatValue::from_bits(sort, &BigUint::from(*v))
+                        FloatValue::from_bits(sort, v)
                     }
                     // Exact real literal rounded under the given mode.
                     [rm, real] => {
@@ -865,9 +865,9 @@ impl FpSolver {
             [Expr::BvConst(sign, 1), Expr::BvConst(exp, ebits), Expr::BvConst(sig, sig_bits)] => {
                 let sort =
                     FloatSort::new((*ebits).try_into().ok()?, (*sig_bits + 1).try_into().ok()?)?;
-                let bits = (BigUint::from(*sign) << (*ebits + *sig_bits))
-                    | (BigUint::from(*exp) << *sig_bits)
-                    | BigUint::from(*sig);
+                let bits = (sign.clone() << (*ebits + *sig_bits))
+                    | (exp.clone() << *sig_bits)
+                    | sig.clone();
                 FloatValue::from_bits(sort, &bits)
             }
             _ => None,

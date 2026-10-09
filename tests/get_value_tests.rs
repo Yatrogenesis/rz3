@@ -7,11 +7,7 @@ use rz3::{Rz3Solver, SolverResult};
 fn fp32(sign: u64, exp: u64, sig: u64) -> Expr {
     Expr::App(
         "fp".to_string(),
-        vec![
-            Expr::BvConst(sign, 1),
-            Expr::BvConst(exp, 8),
-            Expr::BvConst(sig, 23),
-        ],
+        vec![Expr::bv(sign, 1), Expr::bv(exp, 8), Expr::bv(sig, 23)],
     )
 }
 
@@ -31,7 +27,7 @@ fn parser_preserves_get_value_expressions() {
 
     assert_eq!(exprs.len(), 2);
     assert!(matches!(&exprs[0], Expr::Var(name, _) if name == "x"));
-    assert!(matches!(exprs[1], Expr::BvConst(5, 8)));
+    assert_eq!(exprs[1], Expr::bv(5, 8));
 }
 
 #[test]

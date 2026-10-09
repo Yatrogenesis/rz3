@@ -1024,7 +1024,7 @@ impl Rz3Solver {
                 Type::Bool => Some(ModelValue::Bool(false)),
                 Type::Int => Some(ModelValue::Int(BigInt::from(0))),
                 Type::Real => Some(ModelValue::Real(BigRational::from_integer(BigInt::from(0)))),
-                Type::BitVec(w) => Some(ModelValue::BitVec(0, *w)),
+                Type::BitVec(w) => Some(ModelValue::BitVec(num_bigint::BigUint::default(), *w)),
                 _ => None,
             };
             if let Some(v) = default {
@@ -1056,15 +1056,17 @@ impl Rz3Solver {
 
         // Bit-vector variables
         for ((name, bit), &lit) in &self.bv_vars {
-            let val = match self.sat_solver.get_lit_value(lit) {
-                crate::sat::Assignment::True => 1u64,
-                _ => 0u64,
-            };
+            let val = matches!(
+                self.sat_solver.get_lit_value(lit),
+                crate::sat::Assignment::True
+            );
             let entry = model
                 .entry(name.clone())
-                .or_insert(ModelValue::BitVec(0, 0));
+                .or_insert(ModelValue::BitVec(num_bigint::BigUint::default(), 0));
             if let ModelValue::BitVec(curr, width) = entry {
-                *curr |= val << bit;
+                if val {
+                    curr.set_bit(*bit as u64, true);
+                }
                 *width = (*width).max(bit + 1);
             }
         }
@@ -1126,7 +1128,7 @@ impl Rz3Solver {
                     denominator,
                 )))
             }
-            Expr::BvConst(value, width) => Some(ModelValue::BitVec(*value, *width)),
+            Expr::BvConst(value, width) => Some(ModelValue::BitVec(value.clone(), *width)),
             _ => None,
         }
     }

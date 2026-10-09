@@ -211,7 +211,7 @@ fn format_model_value(value: &ModelValue) -> String {
         ModelValue::Bool(value) => value.to_string(),
         ModelValue::Int(value) => format_integer(value),
         ModelValue::Real(value) => format_rational(value),
-        ModelValue::BitVec(value, width) => format!("#b{:0width$b}", value, width = *width),
+        ModelValue::BitVec(value, width) => format_bits(value, *width),
         ModelValue::Float(value) => format_float(value),
     }
 }
@@ -271,7 +271,7 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Int(value) => value.to_string(),
         Expr::Real(value, scale) => format_decimal(*value, *scale),
         Expr::Var(name, _) => name.clone(),
-        Expr::BvConst(value, width) => format!("#b{:0width$b}", value, width = *width),
+        Expr::BvConst(value, width) => format_bits(value, *width),
         Expr::App(name, args) => {
             let rendered = args.iter().map(format_expr).collect::<Vec<_>>().join(" ");
             format!("({} {})", name, rendered)
@@ -378,4 +378,19 @@ fn format_decimal(value: i64, scale: u32) -> String {
     } else {
         rendered
     }
+}
+
+/// `#b...` literal of exactly `width` digits for an arbitrary-precision value.
+fn format_bits(value: &num_bigint::BigUint, width: usize) -> String {
+    let digits = value.to_str_radix(2);
+    let digits = if value == &num_bigint::BigUint::from(0u8) {
+        String::new()
+    } else {
+        digits
+    };
+    format!(
+        "#b{}{}",
+        "0".repeat(width.saturating_sub(digits.len())),
+        digits
+    )
 }

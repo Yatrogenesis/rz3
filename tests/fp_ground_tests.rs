@@ -5,11 +5,7 @@ use rz3::{Rz3Solver, SolverResult};
 fn fp32(sign: u64, exp: u64, sig: u64) -> Expr {
     Expr::App(
         "fp".to_string(),
-        vec![
-            Expr::BvConst(sign, 1),
-            Expr::BvConst(exp, 8),
-            Expr::BvConst(sig, 23),
-        ],
+        vec![Expr::bv(sign, 1), Expr::bv(exp, 8), Expr::bv(sig, 23)],
     )
 }
 

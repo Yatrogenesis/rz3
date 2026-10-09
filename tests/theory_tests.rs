@@ -78,8 +78,8 @@ fn test_bv_basic_sat() {
     let mut solver = Rz3Solver::new();
     // x + 2 = 5 (8-bit)
     let x = Expr::Var("x".to_string(), Type::BitVec(8));
-    let two = Expr::BvConst(2, 8);
-    let five = Expr::BvConst(5, 8);
+    let two = Expr::bv(2, 8);
+    let five = Expr::bv(5, 8);
 
     solver.assert(&Expr::Eq(
         Box::new(Expr::BvAdd(Box::new(x), Box::new(two))),
@@ -94,8 +94,8 @@ fn test_bv_basic_unsat() {
     let mut solver = Rz3Solver::new();
     // x & 1 = 0, x & 1 = 1
     let x = Expr::Var("x".to_string(), Type::BitVec(8));
-    let one = Expr::BvConst(1, 8);
-    let zero = Expr::BvConst(0, 8);
+    let one = Expr::bv(1, 8);
+    let zero = Expr::bv(0, 8);
 
     solver.assert(&Expr::Eq(
         Box::new(Expr::BvAnd(Box::new(x.clone()), Box::new(one.clone()))),
@@ -103,7 +103,7 @@ fn test_bv_basic_unsat() {
     ));
     solver.assert(&Expr::Eq(
         Box::new(Expr::BvAnd(Box::new(x), Box::new(one))),
-        Box::new(Expr::BvConst(1, 8)),
+        Box::new(Expr::bv(1, 8)),
     ));
 
     let result = solver.check();

@@ -295,7 +295,7 @@ impl<'a> BitBlaster<'a> {
                      truncated result)"
                 );
                 (0..*width)
-                    .map(|i| self.constant(i < 64 && (val >> i) & 1 == 1))
+                    .map(|i| self.constant(val.bit(i as u64)))
                     .collect()
             }
             Expr::Var(name, Type::BitVec(width)) => {
