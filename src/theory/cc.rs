@@ -470,6 +470,7 @@ mod tests {
         assert!(cc.check().unwrap().is_empty());
         let clause = cc.assign(-3).unwrap_err();
         assert_eq!(clause, vec![-2, -1, 3]);
+        assert_eq!(cc.conflicts, 1);
     }
 
     #[test]
@@ -479,6 +480,7 @@ mod tests {
         cc.assign(1).unwrap();
         cc.assign(2).unwrap();
         assert_eq!(cc.check().unwrap_err(), vec![-2, -1, 3]);
+        assert_eq!(cc.conflicts, 1);
     }
 
     #[test]
@@ -496,6 +498,20 @@ mod tests {
         cc.assign(-5).unwrap();
         cc.assign(1).unwrap();
         assert_eq!(cc.check().unwrap_err(), vec![-1, 5]);
+        assert_eq!(cc.conflicts, 1);
+    }
+
+    #[test]
+    fn explanation_through_nested_congruence_terminates_and_is_minimal() {
+        // f(f(a)) = f(f(b)) follows from a = b through two congruence steps; explaining it must
+        // visit the shared sub-pairs once and return exactly the literal that justifies them.
+        let mut cc = Cc::new();
+        let (a, b) = (var("a"), var("b"));
+        assert!(cc.register(1, &eq(a.clone(), b.clone())));
+        assert!(cc.register(2, &eq(f(f(a.clone())), f(f(b.clone())))));
+        cc.assign(1).unwrap();
+        assert!(cc.check().unwrap().is_empty());
+        assert_eq!(cc.assign(-2).unwrap_err(), vec![-1, 2]);
     }
 
     #[test]
