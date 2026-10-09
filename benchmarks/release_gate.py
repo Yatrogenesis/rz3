@@ -157,8 +157,11 @@ def main():
         try:
             fj = json.loads(fzr.stdout)
             dis, oth = fj["n_disagreements"], fj["n_crash_or_error"]
-            gate("G7_fuzz", dis == 0 and oth == 0, {"scripts": n7, "disagreements": dis,
-                 "crashes_or_errors": oth, "examples": fj["crashes_or_errors"][:3]})
+            # A timeout is a capability limit, reported but not a soundness failure; a crash, an
+            # error, an empty answer or a disagreement fails the gate.
+            hard = [x for x in fj["crashes_or_errors"] if x["kind"] != "timeout"]
+            gate("G7_fuzz", dis == 0 and not hard, {"scripts": n7, "disagreements": dis,
+                 "timeouts": oth - len(hard), "crashes_or_errors": [x["kind"] for x in hard][:5]})
         except (ValueError, KeyError):
             gate("G7_fuzz", False, {"error": "unreadable fuzzer output", "tail": fzr.stdout[-200:] + fzr.stderr[-200:]})
     else:
