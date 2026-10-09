@@ -288,6 +288,19 @@ pub struct Parser<'a> {
     let_counter: usize,
     /// Result sorts of declared functions (the AST alone cannot type an application).
     fun_ret: BTreeMap<String, Type>,
+    /// Symbol tables saved by `push`, restored by `pop`.
+    scopes: Vec<Scope>,
+}
+
+/// Everything a declaration or a `:named` term can add; `pop` returns to the saved copy.
+#[derive(Clone)]
+struct Scope {
+    consts: BTreeMap<String, Type>,
+    sorts: BTreeMap<String, Option<Type>>,
+    funs: BTreeMap<String, usize>,
+    macros: BTreeMap<String, Macro>,
+    named: BTreeMap<String, Expr>,
+    fun_ret: BTreeMap<String, Type>,
 }
 
 impl<'a> Parser<'a> {
@@ -313,6 +326,7 @@ impl<'a> Parser<'a> {
             quant_depth: 0,
             let_counter: 0,
             fun_ret: BTreeMap::new(),
+            scopes: Vec::new(),
         }
     }
 
@@ -566,8 +580,31 @@ impl<'a> Parser<'a> {
                 };
                 self.expect_rparen()?;
                 if op == "push" {
+                    for _ in 0..n {
+                        self.scopes.push(Scope {
+                            consts: self.consts.clone(),
+                            sorts: self.sorts.clone(),
+                            funs: self.funs.clone(),
+                            macros: self.macros.clone(),
+                            named: self.named.clone(),
+                            fun_ret: self.fun_ret.clone(),
+                        });
+                    }
                     Command::Push(n)
                 } else {
+                    if n > self.scopes.len() {
+                        return self.fail("pop without a matching push");
+                    }
+                    for _ in 0..n {
+                        if let Some(sc) = self.scopes.pop() {
+                            self.consts = sc.consts;
+                            self.sorts = sc.sorts;
+                            self.funs = sc.funs;
+                            self.macros = sc.macros;
+                            self.named = sc.named;
+                            self.fun_ret = sc.fun_ret;
+                        }
+                    }
                     Command::Pop(n)
                 }
             }
