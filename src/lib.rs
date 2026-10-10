@@ -1097,7 +1097,13 @@ impl Rz3Solver {
             return self.get_model().get(name).cloned();
         }
         let model = self.get_model();
-        if let Some(v) = crate::eval::eval(&typed, &model) {
+        // Applications of declared functions need the function table built from the model.
+        let raw = self.raw_model();
+        let funs = self.function_table(&raw);
+        // The visible model also fills in defaults for declared constants the problem never mentions.
+        let mut merged = raw;
+        merged.extend(model);
+        if let Some(v) = crate::eval::eval_with(&typed, &merged, &funs) {
             match v {
                 crate::eval::Value::Bool(b) => return Some(ModelValue::Bool(b)),
                 crate::eval::Value::Num(r) => {

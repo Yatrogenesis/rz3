@@ -177,7 +177,6 @@ fn get_value_prints_term_and_exact_value() {
 // goes through the Rust Debug-style `Display`, e.g. `BvShl(Var("b", BitVec(8)), ...)`,
 // which is not SMT-LIB. Z3 echoes the original term.
 #[test]
-#[ignore = "defect: get-value echo of bvshl/concat/bvneg/bvult/mod/div/to_int/is_int is not SMT-LIB"]
 fn get_value_echoes_every_operator_as_smtlib() {
     let o = run("get_value_unsupported_echo");
     assert_eq!(
@@ -211,14 +210,14 @@ fn get_value_values_for_unsupported_echo_are_right_even_if_the_echo_is_not() {
 // DEFECT (reported, not fixed): get-value silently drops applications of declared
 // functions. Z3 answers `(((f x) 11) ((f 7) 11))`.
 #[test]
-#[ignore = "defect: get-value omits uninterpreted-function applications"]
 fn get_value_of_uninterpreted_function_application() {
     expect("get_value_uf", "sat\n(((f x) 11) ((f 7) 11))\n", 0);
 }
 
 #[test]
-fn get_value_uf_currently_prints_an_empty_list() {
-    expect("get_value_uf", "sat\n()\n", 0);
+fn get_value_of_an_application_of_a_declared_function() {
+    // Z3 5.1.0 prints the same values for both applications (the assertion fixes f at 7).
+    expect("get_value_uf", "sat\n(((f x) 11) ((f 7) 11))\n", 0);
 }
 
 // ------------------------------------------------------------------ errors
@@ -329,7 +328,6 @@ fn missing_file_reports_on_stderr_and_prints_no_verdict() {
 // DEFECT (reported, not fixed): an unreadable input exits with status 0, so a caller that
 // only checks the exit code cannot tell it from a successful run. Z3 exits non-zero.
 #[test]
-#[ignore = "defect: missing input file exits with status 0"]
 fn missing_file_exits_nonzero() {
     let missing = std::env::temp_dir().join("rz3_cli_no_such_file_7f3a.smt2");
     let o = run_path(Some(missing.as_os_str()), &[]);

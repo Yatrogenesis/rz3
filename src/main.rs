@@ -31,7 +31,7 @@ fn real_main() {
         Ok(input) => input,
         Err(err) => {
             eprintln!("failed to read {}: {}", args[1], err);
-            return;
+            std::process::exit(1);
         }
     };
     let mut parser = Parser::strict(&input);
@@ -319,6 +319,36 @@ fn format_expr(expr: &Expr) -> String {
         Expr::StrContains(a, b) => format!("(str.contains {} {})", format_expr(a), format_expr(b)),
         Expr::ForAll(vars, body) => format_quantifier("forall", vars, body),
         Expr::Exists(vars, body) => format_quantifier("exists", vars, body),
+        Expr::BigRat(num, den) => match num.strip_prefix('-') {
+            Some(abs) => format!("(- (/ {abs}.0 {den}.0))"),
+            None => format!("(/ {num}.0 {den}.0)"),
+        },
+        Expr::Implies(a, b) => format!("(=> {} {})", format_expr(a), format_expr(b)),
+        Expr::IntDiv(a, b) => format!("(div {} {})", format_expr(a), format_expr(b)),
+        Expr::IntMod(a, b) => format!("(mod {} {})", format_expr(a), format_expr(b)),
+        Expr::ToInt(a) => format!("(to_int {})", format_expr(a)),
+        Expr::IsInt(a) => format!("(is_int {})", format_expr(a)),
+        Expr::BvNeg(a) => format!("(bvneg {})", format_expr(a)),
+        Expr::BvUdiv(a, b) => format!("(bvudiv {} {})", format_expr(a), format_expr(b)),
+        Expr::BvUrem(a, b) => format!("(bvurem {} {})", format_expr(a), format_expr(b)),
+        Expr::BvSdiv(a, b) => format!("(bvsdiv {} {})", format_expr(a), format_expr(b)),
+        Expr::BvSrem(a, b) => format!("(bvsrem {} {})", format_expr(a), format_expr(b)),
+        Expr::BvSmod(a, b) => format!("(bvsmod {} {})", format_expr(a), format_expr(b)),
+        Expr::BvShl(a, b) => format!("(bvshl {} {})", format_expr(a), format_expr(b)),
+        Expr::BvLshr(a, b) => format!("(bvlshr {} {})", format_expr(a), format_expr(b)),
+        Expr::BvAshr(a, b) => format!("(bvashr {} {})", format_expr(a), format_expr(b)),
+        Expr::BvUle(a, b) => format!("(bvule {} {})", format_expr(a), format_expr(b)),
+        Expr::BvUlt(a, b) => format!("(bvult {} {})", format_expr(a), format_expr(b)),
+        Expr::BvSle(a, b) => format!("(bvsle {} {})", format_expr(a), format_expr(b)),
+        Expr::BvSlt(a, b) => format!("(bvslt {} {})", format_expr(a), format_expr(b)),
+        Expr::BvConcat(a, b) => format!("(concat {} {})", format_expr(a), format_expr(b)),
+        Expr::BvZeroExt(n, a) => format!("((_ zero_extend {n}) {})", format_expr(a)),
+        Expr::BvSignExt(n, a) => format!("((_ sign_extend {n}) {})", format_expr(a)),
+        Expr::BvRotl(n, a) => format!("((_ rotate_left {n}) {})", format_expr(a)),
+        Expr::BvRotr(n, a) => format!("((_ rotate_right {n}) {})", format_expr(a)),
+        Expr::BvRepeat(n, a) => format!("((_ repeat {n}) {})", format_expr(a)),
+        Expr::ConstArray(ty, v) => format!("((as const {}) {})", format_type(ty), format_expr(v)),
+        #[allow(unreachable_patterns)]
         _ => expr.to_string(),
     }
 }
