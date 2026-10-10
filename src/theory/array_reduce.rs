@@ -176,7 +176,7 @@ impl ArrayReducer {
                     self.fresh_index.insert(ty.clone(), d.clone());
                     self.indices.entry(ty.clone()).or_default().push(d.clone());
                     for s in 0..self.sources.len() {
-                        self.instantiate(s, &d, lemmas);
+                        self.instantiate(s, &d, ty, lemmas);
                     }
                 }
                 _ => self.truncated = true,
@@ -192,7 +192,7 @@ impl ArrayReducer {
             .push(idx.clone());
         // Instantiate every source of axioms at the new index.
         for s in 0..self.sources.len() {
-            self.instantiate(s, idx, lemmas);
+            self.instantiate(s, idx, ty, lemmas);
         }
     }
 
@@ -200,7 +200,11 @@ impl ArrayReducer {
         self.indices.get(ty).cloned().unwrap_or_default()
     }
 
-    fn instantiate(&mut self, source: usize, j: &Expr, lemmas: &mut Vec<Expr>) {
+    /// `jty` is the sort under which the index `j` was registered. It is NOT recomputed with
+    /// `j.get_type()`: an application of an uninterpreted function has no type yet at this stage
+    /// (`Type::Unknown`), and comparing types structurally silently dropped the axioms for such
+    /// indices, which made `f(i) = i /\ select(store(A, f(i), 7), i) != 7` satisfiable.
+    fn instantiate(&mut self, source: usize, j: &Expr, jty: &Type, lemmas: &mut Vec<Expr>) {
         // Clone the pieces first: instantiation creates select variables, which needs `&mut self`.
         enum Piece {
             Store(Expr, Expr, Expr),
@@ -214,7 +218,7 @@ impl ArrayReducer {
         };
         match piece {
             Piece::Store(b, a, i) => {
-                if j.get_type() != i.get_type() {
+                if index_type(&b.get_type()).as_ref() != Some(jty) {
                     return;
                 }
                 let sb = self.select_var(&b, j, lemmas);
@@ -223,7 +227,7 @@ impl ArrayReducer {
                 self.defer(Expr::Or(vec![eq(j, &i), eq(&sb, &sa)]));
             }
             Piece::Const(c, v) => {
-                if index_type(&c.get_type()).as_ref() != Some(&j.get_type()) {
+                if index_type(&c.get_type()).as_ref() != Some(jty) {
                     return;
                 }
                 let sc = self.select_var(&c, j, lemmas);
@@ -231,7 +235,7 @@ impl ArrayReducer {
                 self.defer(eq(&sc, &v));
             }
             Piece::Eq(e, a, b) => {
-                if index_type(&a.get_type()).as_ref() != Some(&j.get_type()) {
+                if index_type(&a.get_type()).as_ref() != Some(jty) {
                     return;
                 }
                 let sa = self.select_var(&a, j, lemmas);
@@ -250,10 +254,10 @@ impl ArrayReducer {
         let elem = element_type(&a.get_type()).unwrap_or(Type::Unknown);
         let v = Expr::Var(self.name("sel"), elem);
         let earlier = self.sels_by_array.get(a).cloned().unwrap_or_default();
+        // Every earlier read of the same array uses an index of the same sort by typing, so no
+        // comparison of `get_type()` (unreliable for function applications) is needed.
         for (j, vj) in &earlier {
-            if j.get_type() == i.get_type() {
-                self.defer(Expr::Or(vec![not(eq(i, j)), eq(&v, vj)]));
-            }
+            self.defer(Expr::Or(vec![not(eq(i, j)), eq(&v, vj)]));
         }
         self.sels_by_array
             .entry(a.clone())
@@ -288,7 +292,7 @@ impl ArrayReducer {
         });
         if let Some(it) = index_type(&a.get_type()) {
             for j in self.known_indices(&it) {
-                self.instantiate(s, &j, lemmas);
+                self.instantiate(s, &j, &it, lemmas);
             }
         }
         b
@@ -308,7 +312,7 @@ impl ArrayReducer {
         });
         if let Some(it) = index_type(ty) {
             for j in self.known_indices(&it) {
-                self.instantiate(s, &j, lemmas);
+                self.instantiate(s, &j, &it, lemmas);
             }
         }
         c
@@ -338,7 +342,7 @@ impl ArrayReducer {
             b: b.clone(),
         });
         for j in self.known_indices(&it) {
-            self.instantiate(s, &j, lemmas);
+            self.instantiate(s, &j, &it, lemmas);
         }
         e
     }

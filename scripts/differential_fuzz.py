@@ -280,6 +280,9 @@ class Gen:
             return r.choice(["i1", "i2", "i3"])
         if d <= 0 or r.random() < 0.5:
             return r.choice(["a", "b", "c", str(r.randint(0, 3))])
+        if r.random() < 0.35:
+            # function applications as indices: the reducer once dropped axioms for them
+            return f"(f {self.arr_index(d-1)})"
         return f"(+ {self.arr_index(d-1)} {r.choice(['1','2','(- 1)'])})"
 
     def arr_elem(self, d):
@@ -288,6 +291,8 @@ class Gen:
             return r.choice(["e1", "e2", "e3"])
         if d <= 0 or r.random() < 0.5:
             return r.choice(["a", "b", str(r.randint(0, 4))])
+        if r.random() < 0.25:
+            return f"(f {self.arr_elem(d-1)})"
         return f"(+ {self.arr_elem(d-1)} {r.choice(['1','2'])})"
 
     def arr_term(self, d):
@@ -432,6 +437,7 @@ class Gen:
                 lines += [f"(declare-fun {v} () (Array I E))" for v in "ABC"]
             else:
                 lines += [f"(declare-fun {v} () Int)" for v in "abc"]
+                lines += ["(declare-fun f (Int) Int)"]
                 lines += [f"(declare-fun {v} () (Array Int Int))" for v in "ABC"]
             lines += [f"(declare-fun {v} () Bool)" for v in "mn"]
             return lines
