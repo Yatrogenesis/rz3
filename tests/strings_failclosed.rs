@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// \1MIT OR Apache-2.0
 //! Fail-closed regression battery for strings and regular expressions (QF_S / QF_SLIA).
 //!
 //! Each case carries the verdict Z3 gives (recorded 2026-10-08). RZ3 may answer

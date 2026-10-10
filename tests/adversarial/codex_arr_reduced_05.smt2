@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: MIT
+; \1MIT OR Apache-2.0
 (set-info :smt-lib-version 2.6)
 (set-logic QF_AUFLIA)
 (declare-const A (Array Int Int))

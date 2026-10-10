@@ -1,3 +1,9 @@
+//! Legacy linear-real-arithmetic solver (`LraSolver`).
+//!
+//! Deprecated since 0.2.0: the main pipeline does not use it (it uses `linarith` and
+//! `simplex`), and it will be removed from this crate in a later release. It is kept in 0.2.0 so
+//! that code importing `rz3::theory::lra::LraSolver` keeps compiling.
+
 use crate::ast::{Expr, ModelValue, Type};
 use crate::theory::TheorySolver;
 use num_bigint::BigInt;

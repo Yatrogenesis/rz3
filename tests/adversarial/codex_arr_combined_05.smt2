@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: MIT
+; \1MIT OR Apache-2.0
 ; SMT-LIB 2.6 differential QA
 (set-info :smt-lib-version 2.6)
 (set-logic ALL)

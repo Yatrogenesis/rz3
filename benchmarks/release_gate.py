@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# \1MIT OR Apache-2.0
 """Release gate for rz3: nothing is integrated unless every layer passes.
 
 Builds the release binary of an exact commit in a clean checkout (own target directory, so no

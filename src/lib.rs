@@ -1,16 +1,15 @@
-//! Deterministic, exact-rational SMT solving in pure Rust.
+//! Deterministic SMT solving in pure Rust over exact rational arithmetic.
 //!
-//! `rz3` is a small DPLL(T)/CDCL solver focused on reproducible, embeddable
-//! reasoning without native dependencies. Arithmetic in the linear-arithmetic
-//! core uses arbitrary-precision rationals (`num-rational`/`num-bigint`) and
-//! symbolic strict bounds instead of floating-point approximations.
+//! `rz3` is a DPLL(T)/CDCL solver for a subset of SMT-LIB 2.6 (Booleans, linear and
+//! non-linear arithmetic, uninterpreted functions and sorts, arrays, bit-vectors, and ground
+//! floating point). Arithmetic uses arbitrary-precision rationals, with symbolic strict bounds,
+//! instead of floating-point approximations.
 //!
-//! The project is intentionally narrower than mature solvers such as Z3. The
-//! LRA/LIA path is the most developed part of the crate, while arrays, EUF,
-//! bit-vectors, strings, floating-point, quantifiers, non-linear arithmetic and
-//! the SMT-LIB front-end are implemented as focused subsets. Some unresolved
-//! cases return [`SolverResult::Unknown`]; callers should handle that result
-//! explicitly.
+//! Answer policy: a `sat` answer is re-checked by an exact evaluator against the original
+//! assertions and becomes [`SolverResult::Unknown`] if it cannot be confirmed; `unsat` comes from
+//! the theory reasoning and has no independent proof checker; `unknown` is a sound non-answer.
+//! The solver is narrower than mature solvers such as Z3 and cvc5, and makes no claim about
+//! speed. See the `README` for the supported fragment and the evidence behind it.
 //!
 //! # Example
 //!

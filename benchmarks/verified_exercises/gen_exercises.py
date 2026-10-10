@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# \1MIT OR Apache-2.0
 """Verifiable-by-construction SMT-LIB exercises.
 
 Every instance has a ground truth computed by an independent, solver-free oracle written in
