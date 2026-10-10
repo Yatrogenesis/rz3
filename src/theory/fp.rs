@@ -93,7 +93,21 @@ impl FloatValue {
             }
             _ => {
                 let sum = self.exact_rational()? + other.exact_rational()?;
-                class_from_rounded_bits(self.sort, &sum, mode)
+                if sum.is_zero() {
+                    // IEEE 754-2019 6.3: x + x with both zeros of one sign keeps that sign; every
+                    // other exactly-zero sum (opposite zeros, or x + (-x)) is +0, except under
+                    // roundTowardNegative where it is -0.
+                    let (a, b) = (&self.class, &other.class);
+                    let negative =
+                        if is_zero(a) && is_zero(b) && sign_negative(a) == sign_negative(b) {
+                            sign_negative(a)
+                        } else {
+                            mode == RoundingMode::TowardNegative
+                        };
+                    signed_zero(negative)
+                } else {
+                    class_from_rounded_bits(self.sort, &sum, mode)
+                }
             }
         };
         Some(Self {
@@ -126,7 +140,12 @@ impl FloatValue {
             }
             _ => {
                 let product = self.exact_rational()? * other.exact_rational()?;
-                class_from_rounded_bits(self.sort, &product, mode)
+                if product.is_zero() {
+                    // IEEE 754-2019 6.3: the sign of a zero product is the XOR of the signs.
+                    signed_zero(sign_negative(&self.class) ^ sign_negative(&other.class))
+                } else {
+                    class_from_rounded_bits(self.sort, &product, mode)
+                }
             }
         };
         Some(Self {
@@ -168,7 +187,11 @@ impl FloatValue {
             }
             _ => {
                 let quotient = self.exact_rational()? / other.exact_rational()?;
-                class_from_rounded_bits(self.sort, &quotient, mode)
+                if quotient.is_zero() {
+                    signed_zero(sign_negative(&self.class) ^ sign_negative(&other.class))
+                } else {
+                    class_from_rounded_bits(self.sort, &quotient, mode)
+                }
             }
         };
         Some(Self {
@@ -324,6 +347,15 @@ fn encode_value(sort: FloatSort, class: &FloatClass, mode: RoundingMode) -> BigU
         FloatClass::Finite { negative, value } => {
             round_finite_to_bits(sort, *negative, value, mode)
         }
+    }
+}
+
+/// A zero of the given sign.
+fn signed_zero(negative: bool) -> FloatClass {
+    if negative {
+        FloatClass::NegativeZero
+    } else {
+        FloatClass::PositiveZero
     }
 }
 

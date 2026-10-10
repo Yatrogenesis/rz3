@@ -165,7 +165,6 @@ fn z3_table_binary_arithmetic_all_modes_and_formats() {
 // signs. Z3 agrees with the standard (e.g. `add b16 0000 8000 RTN` -> 8000, `mul b32 80000000
 // 3f800000` -> 80000000).
 #[test]
-#[ignore = "known defect: sign of exactly-zero results of add/sub/mul/div (IEEE 754-2019 6.3)"]
 fn ieee_signed_zero_of_exact_zero_results() {
     run_binary_table(true);
 }
