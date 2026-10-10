@@ -74,9 +74,9 @@ fn text_path_never_weakens_a_formula() {
         ("let", "(assert (let ((y1 (+ a 1))) (and (> y1 5) (< y1 0))))", Unsat),
         // div/mod by zero are unspecified (total, uninterpreted) in SMT-LIB: never force a value
         // (found by typefuzz: `(mod 31415927 0)` was rewritten to the dividend and refuted a sat problem)
-        ("mod by constant zero is free", "(assert (>= (mod 5 0) 10))", SatOrDecline),
-        ("div by constant zero is free", "(assert (= (div a 0) 7))", SatOrDecline),
-        ("mod by variable zero is free", "(assert (and (= c 0) (>= (mod a c) 100)))", SatOrDecline),
+        ("mod by constant zero is free", "(assert (>= (mod 5 0) 10))", Sat),
+        ("div by constant zero is free", "(assert (= (div a 0) 7))", Sat),
+        ("mod by variable zero is free", "(assert (and (= c 0) (>= (mod a c) 100)))", Sat),
         // overflow predicates and reductions, exhaustively checked against Z3 for widths 3 and 4
         ("bvuaddo carry", "(assert (bvuaddo #b1100 #b0100))", Sat),
         ("bvuaddo no carry", "(assert (bvuaddo #b0100 #b0010))", Unsat),
@@ -100,9 +100,9 @@ fn text_path_never_weakens_a_formula() {
         ("real division by variable unsat", "(assert (and (= (/ x y) 2.0) (= y 3.0) (= x 7.0)))", Unsat),
         // division by zero is a total function of its arguments (CVJ adversarial finding):
         // independent free values per occurrence made these satisfiable; Z3 and cvc5 say unsat
-        ("div zero functional", "(assert (and (= c 0) (= (div a c) 3) (= (div a 0) 4)))", UnsatOrDecline),
-        ("mod zero functional", "(assert (and (= (mod a 0) (+ a 1)) (= (mod a 0) a)))", UnsatOrDecline),
-        ("real div zero functional", "(assert (and (= y 0.0) (= (/ x y) 1.0) (= (/ x 0.0) 2.0)))", UnsatOrDecline),
+        ("div zero functional", "(assert (and (= c 0) (= (div a c) 3) (= (div a 0) 4)))", Unsat),
+        ("mod zero functional", "(assert (and (= (mod a 0) (+ a 1)) (= (mod a 0) a)))", Unsat),
+        ("real div zero functional", "(assert (and (= y 0.0) (= (/ x y) 1.0) (= (/ x 0.0) 2.0)))", Unsat),
         // let values that are large are named by a fresh constant instead of being copied at each use
         ("nested lets share", "(assert (let ((u (+ a a a a a a a a a a a a a a a a a a a a a a a a a a))) (let ((w (+ u u u u u u u u u u u u u u u u u u u u u u u u u u u u))) (and (> w 5) (< u 0) (> a 0)))))", Unsat),
         ("nested lets sat", "(assert (let ((u (+ a a a a a a a a a a a a a a a a a a a a a a a a a a))) (let ((w (+ u u u u u u u u u u u u u u u u u u u u u u u u u u u u))) (and (> w 5) (> a 0)))))", Sat),

@@ -205,6 +205,10 @@ pub struct Rz3Solver {
     app_by_fn: BTreeMap<String, Vec<(Vec<Expr>, Expr)>>,
     /// Fresh variables standing for `div`/`to_int` terms (memoised by the reduced term).
     def_vars: BTreeMap<Expr, Expr>,
+    /// Division-like terms whose divisor may be zero: (kind, dividend, divisor, value variable).
+    zero_div_terms: Vec<(u8, Expr, Expr, Expr)>,
+    /// Too many such terms to relate pairwise: a model with a zero divisor is then not trusted.
+    zero_div_overflow: bool,
     /// Fresh variables standing for term-level `ite` (memoised by the reduced term).
     ite_vars: BTreeMap<Expr, Expr>,
     /// Every formula handed to the theories (after `ite` lifting, Ackermann reduction and
@@ -260,6 +264,8 @@ impl Rz3Solver {
             app_vars: BTreeMap::new(),
             app_by_fn: BTreeMap::new(),
             def_vars: BTreeMap::new(),
+            zero_div_terms: Vec::new(),
+            zero_div_overflow: false,
             ite_vars: BTreeMap::new(),
             processed: Vec::new(),
         }
@@ -343,6 +349,8 @@ impl Rz3Solver {
         self.app_vars = BTreeMap::new();
         self.app_by_fn = BTreeMap::new();
         self.def_vars = BTreeMap::new();
+        self.zero_div_terms = Vec::new();
+        self.zero_div_overflow = false;
         self.ite_vars = BTreeMap::new();
         self.processed = Vec::new();
 
@@ -575,7 +583,7 @@ impl Rz3Solver {
             Expr::IntMod(x, c) => self.modulo_variable(x, c, lemmas),
             // Real division by a non-constant: q = x / y  <=>  y = 0 \/ q * y = x. The value at
             // y = 0 is unspecified in SMT-LIB, so q stays free there.
-            Expr::Div(x, y) if y.as_constant().is_none() => {
+            Expr::Div(x, y) if !Self::nonzero_constant(y) => {
                 let key = rebuilt.clone();
                 if let Some(v) = self.def_vars.get(&key) {
                     return v.clone();
@@ -588,6 +596,7 @@ impl Rz3Solver {
                         x.clone(),
                     ),
                 ]));
+                self.register_zero_div(2, x, y, &q, lemmas);
                 self.def_vars.insert(key, q.clone());
                 q
             }
@@ -598,6 +607,50 @@ impl Rz3Solver {
             }
             _ => rebuilt,
         }
+    }
+
+    fn nonzero_constant(c: &Expr) -> bool {
+        c.as_constant()
+            .is_some_and(|v| v != num_rational::BigRational::from_integer(0.into()))
+    }
+
+    /// SMT-LIB makes `div`, `mod` and `/` by zero total functions of the dividend: two occurrences
+    /// with equal dividends and zero divisors must have the same value. Each new term whose
+    /// divisor may be zero is related to the earlier ones of the same kind. The number of terms
+    /// is capped; beyond it the certification refuses models with a zero divisor instead.
+    fn register_zero_div(
+        &mut self,
+        kind: u8,
+        x: &Expr,
+        c: &Expr,
+        v: &Expr,
+        lemmas: &mut Vec<Expr>,
+    ) {
+        const CAP: usize = 40;
+        if Self::nonzero_constant(c) {
+            return;
+        }
+        let zero = |e: &Expr| Expr::Eq(Box::new(e.clone()), Box::new(Expr::Int(0)));
+        let same_kind: Vec<(Expr, Expr, Expr)> = self
+            .zero_div_terms
+            .iter()
+            .filter(|t| t.0 == kind)
+            .map(|t| (t.1.clone(), t.2.clone(), t.3.clone()))
+            .collect();
+        if same_kind.len() >= CAP {
+            self.zero_div_overflow = true;
+            return;
+        }
+        for (x2, c2, v2) in same_kind {
+            lemmas.push(Expr::Or(vec![
+                Expr::Not(Box::new(zero(c))),
+                Expr::Not(Box::new(zero(&c2))),
+                Expr::Not(Box::new(Expr::Eq(Box::new(x.clone()), Box::new(x2)))),
+                Expr::Eq(Box::new(v.clone()), Box::new(v2)),
+            ]));
+        }
+        self.zero_div_terms
+            .push((kind, x.clone(), c.clone(), v.clone()));
     }
 
     /// `mod x c` as its own variable. The identity `mod x c = x - c * div x c` only holds when
@@ -625,6 +678,7 @@ impl Rz3Solver {
                 definition,
             ]));
         }
+        self.register_zero_div(1, x, c, &r, lemmas);
         self.def_vars.insert(key, r.clone());
         r
     }
@@ -665,6 +719,7 @@ impl Rz3Solver {
                 bounds,
             ]));
         }
+        self.register_zero_div(0, x, c, &q, lemmas);
         self.def_vars.insert(key, q.clone());
         q
     }
@@ -1549,19 +1604,19 @@ impl Rz3Solver {
             let full_model = self.raw_model();
             let funs = self.function_table(&full_model);
             let none = crate::eval::FunTable::new();
-            // SMT-LIB makes `div`/`mod`/`/` by zero a total function of its arguments; the
-            // reduction treats each occurrence as a free value. That is exact only if no divisor
-            // is zero in the model, so a model with a zero (or unevaluable) divisor is not
-            // reported as sat.
-            let zero_divisor = self.assertion_history.iter().any(|f| {
-                self.resolve_expr_types(f).any_subterm(&|e| match e {
-                    Expr::IntDiv(_, d) | Expr::IntMod(_, d) | Expr::Div(_, d) => !matches!(
-                        crate::eval::eval(d, &full_model),
-                        Some(crate::eval::Value::Num(r)) if !num_traits::Zero::is_zero(&r)
-                    ),
-                    _ => false,
-                })
-            });
+            // `div`/`mod`/`/` by zero are total functions of the dividend; the pairwise lemmas of
+            // `register_zero_div` enforce that. Only when there were too many such terms to relate
+            // is a model with a zero (or unevaluable) divisor refused.
+            let zero_divisor = self.zero_div_overflow
+                && self.assertion_history.iter().any(|f| {
+                    self.resolve_expr_types(f).any_subterm(&|e| match e {
+                        Expr::IntDiv(_, d) | Expr::IntMod(_, d) | Expr::Div(_, d) => !matches!(
+                            crate::eval::eval(d, &full_model),
+                            Some(crate::eval::Value::Num(r)) if !num_traits::Zero::is_zero(&r)
+                        ),
+                        _ => false,
+                    })
+                });
             if zero_divisor {
                 return self.unknown("division by zero in the model");
             }
