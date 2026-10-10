@@ -343,3 +343,171 @@ impl ArrayReducer {
         e
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arr(i: Type, e: Type) -> Type {
+        Type::Array(Box::new(i), Box::new(e))
+    }
+    fn a(name: &str) -> Expr {
+        Expr::Var(name.to_string(), arr(Type::Int, Type::Int))
+    }
+    fn iv(name: &str) -> Expr {
+        Expr::Var(name.to_string(), Type::Int)
+    }
+    fn sel(arr: Expr, i: Expr) -> Expr {
+        Expr::Select(Box::new(arr), Box::new(i))
+    }
+
+    #[test]
+    fn fresh_reducer_is_inactive_and_empty() {
+        let r = ArrayReducer::new();
+        assert_eq!(r.sizes(), (0, 0, 0, 0));
+        assert!(!r.active());
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn select_becomes_a_named_variable_with_a_default_index() {
+        let mut r = ArrayReducer::new();
+        let mut lemmas = Vec::new();
+        let out = r.reduce(&sel(a("a"), iv("i")), &mut lemmas);
+        assert_eq!(out, Expr::Var("__sel_1".to_string(), Type::Int));
+        assert!(lemmas.is_empty(), "read lemmas are deferred, not emitted");
+        // One select; the default index and `i` are known; default != i is deferred.
+        assert_eq!(r.sizes(), (1, 0, 1, 2));
+        assert!(r.active());
+        assert!(!r.truncated);
+        // The same select is shared; a second index adds a select, a congruence lemma
+        // and a disequality with the default.
+        assert_eq!(r.reduce(&sel(a("a"), iv("i")), &mut lemmas), out);
+        let out2 = r.reduce(&sel(a("a"), iv("j")), &mut lemmas);
+        assert_eq!(out2, Expr::Var("__sel_3".to_string(), Type::Int));
+        assert_eq!(r.sizes(), (2, 0, 3, 3));
+    }
+
+    #[test]
+    fn deferred_lemmas_are_released_only_when_the_model_does_not_confirm_them() {
+        let build = || {
+            let mut r = ArrayReducer::new();
+            let mut l = Vec::new();
+            r.reduce(&sel(a("a"), iv("i")), &mut l);
+            r
+        };
+        let mut r = build();
+        assert!(r.take_violated(&|_| Some(true)).is_empty());
+        assert_eq!(r.sizes().2, 1, "confirmed lemmas stay pending");
+        let mut r = build();
+        let v = r.take_violated(&|_| Some(false));
+        assert_eq!(v.len(), 1);
+        assert_eq!(r.sizes().2, 0, "released lemmas leave the pending list");
+        let mut r = build();
+        assert_eq!(r.take_violated(&|_| None).len(), 1);
+        assert_eq!(r.sizes().2, 0);
+        // The released lemma is default != i.
+        let mut r = build();
+        let v = r.take_violated(&|_| None);
+        assert_eq!(
+            v,
+            vec![Expr::Not(Box::new(Expr::Eq(
+                Box::new(Expr::Var("__default_2".to_string(), Type::Int)),
+                Box::new(iv("i"))
+            )))]
+        );
+    }
+
+    #[test]
+    fn infinite_index_sorts() {
+        assert_eq!(ArrayReducer::infinite(&Type::Int), Some(true));
+        assert_eq!(ArrayReducer::infinite(&Type::Real), Some(true));
+        assert_eq!(
+            ArrayReducer::infinite(&Type::Sort("S".to_string())),
+            Some(true)
+        );
+        assert_eq!(ArrayReducer::infinite(&Type::BitVec(20)), Some(true));
+        assert_eq!(ArrayReducer::infinite(&Type::BitVec(64)), Some(true));
+        assert_eq!(ArrayReducer::infinite(&Type::BitVec(19)), Some(false));
+        assert_eq!(ArrayReducer::infinite(&Type::BitVec(1)), Some(false));
+        assert_eq!(ArrayReducer::infinite(&Type::Bool), None);
+    }
+
+    #[test]
+    fn finite_index_sorts_withhold_satisfiable_verdicts() {
+        // Bit-vector index of width 8: no fresh default index, and the reducer says so.
+        let bv8 = Type::BitVec(8);
+        let arr8 = Expr::Var("m".to_string(), arr(bv8.clone(), Type::Int));
+        let mut r = ArrayReducer::new();
+        let mut l = Vec::new();
+        r.reduce(&sel(arr8, Expr::Var("k".to_string(), bv8)), &mut l);
+        assert!(r.truncated);
+        assert_eq!(r.sizes(), (1, 0, 0, 1));
+        // Wide bit-vectors and integers are not truncated.
+        let bv32 = Type::BitVec(32);
+        let arr32 = Expr::Var("m".to_string(), arr(bv32.clone(), Type::Int));
+        let mut r = ArrayReducer::new();
+        r.reduce(&sel(arr32, Expr::Var("k".to_string(), bv32)), &mut l);
+        assert!(!r.truncated);
+        assert_eq!(r.sizes(), (1, 0, 1, 2));
+    }
+
+    #[test]
+    fn store_emits_read_over_write_and_defers_the_frame_lemmas() {
+        let mut r = ArrayReducer::new();
+        let mut lemmas = Vec::new();
+        let st = Expr::Store(Box::new(a("a")), Box::new(iv("i")), Box::new(iv("v")));
+        let out = r.reduce(&st, &mut lemmas);
+        assert_eq!(
+            out,
+            Expr::Var("__st_1".to_string(), arr(Type::Int, Type::Int))
+        );
+        // sel(b, i) = v, emitted immediately.
+        assert_eq!(
+            lemmas,
+            vec![Expr::Eq(
+                Box::new(Expr::Var("__sel_2".to_string(), Type::Int)),
+                Box::new(iv("v"))
+            )]
+        );
+        assert_eq!(r.sizes().1, 1);
+        assert!(r.active());
+        // The same store is shared.
+        assert_eq!(r.reduce(&st, &mut lemmas), out);
+        assert_eq!(lemmas.len(), 1);
+    }
+
+    #[test]
+    fn constant_array_alone_makes_the_reducer_active() {
+        let mut r = ArrayReducer::new();
+        let mut l = Vec::new();
+        let c = Expr::ConstArray(arr(Type::Int, Type::Int), Box::new(Expr::Int(0)));
+        let out = r.reduce(&c, &mut l);
+        assert_eq!(
+            out,
+            Expr::Var("__const_1".to_string(), arr(Type::Int, Type::Int))
+        );
+        assert_eq!(r.sizes(), (0, 1, 0, 0));
+        assert!(r.active());
+        assert_eq!(r.reduce(&c, &mut l), out);
+    }
+
+    #[test]
+    fn array_equality_is_symmetric_and_names_a_boolean() {
+        let mut r = ArrayReducer::new();
+        let mut l = Vec::new();
+        let ab = Expr::Eq(Box::new(a("a")), Box::new(a("b")));
+        let ba = Expr::Eq(Box::new(a("b")), Box::new(a("a")));
+        let e1 = r.reduce(&ab, &mut l);
+        let e2 = r.reduce(&ba, &mut l);
+        assert_eq!(e1, e2);
+        assert!(matches!(&e1, Expr::Var(n, Type::Bool) if n.starts_with("__aeq_")));
+        // Extensionality: e or sel(a,k) != sel(b,k).
+        assert_eq!(l.len(), 1);
+        assert!(matches!(&l[0], Expr::Or(v) if v.len() == 2 && v[0] == e1));
+        assert_eq!(r.sizes().1, 1);
+        // Equality of non-array terms is untouched.
+        let plain = Expr::Eq(Box::new(iv("x")), Box::new(iv("y")));
+        assert_eq!(r.reduce(&plain, &mut l), plain);
+    }
+}

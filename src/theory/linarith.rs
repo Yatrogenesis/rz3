@@ -652,3 +652,411 @@ impl TheoryHook for LinArith {
         outcome
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b(e: Expr) -> Box<Expr> {
+        Box::new(e)
+    }
+    fn int(n: i64) -> Expr {
+        Expr::Int(n)
+    }
+    fn iv(n: &str) -> Expr {
+        Expr::Var(n.to_string(), Type::Int)
+    }
+    fn rv(n: &str) -> Expr {
+        Expr::Var(n.to_string(), Type::Real)
+    }
+    fn half(n: i64) -> Expr {
+        // n / 2
+        Expr::Div(b(int(n)), b(int(2)))
+    }
+    fn q(n: i64) -> Q {
+        Q::from_i64(n)
+    }
+    fn le(x: Expr, y: Expr) -> Expr {
+        Expr::Le(b(x), b(y))
+    }
+    fn lt(x: Expr, y: Expr) -> Expr {
+        Expr::Lt(b(x), b(y))
+    }
+    fn ge(x: Expr, y: Expr) -> Expr {
+        Expr::Ge(b(x), b(y))
+    }
+    fn eq(x: Expr, y: Expr) -> Expr {
+        Expr::Eq(b(x), b(y))
+    }
+    fn add(x: Expr, y: Expr) -> Expr {
+        Expr::Add(vec![x, y])
+    }
+    fn sub(x: Expr, y: Expr) -> Expr {
+        Expr::Sub(vec![x, y])
+    }
+    fn mul(x: Expr, y: Expr) -> Expr {
+        Expr::Mul(vec![x, y])
+    }
+    /// Assign the literals in order and run `check`; true when any step reports a conflict.
+    fn conflicts(la: &mut LinArith, lits: &[i32]) -> bool {
+        for &l in lits {
+            if la.assign(l).is_err() {
+                return true;
+            }
+        }
+        la.check().is_err()
+    }
+
+    #[test]
+    fn accessors_on_empty_and_registered_state() {
+        let mut la = LinArith::new();
+        assert_eq!(la.num_atoms(), 0);
+        assert_eq!(la.pivots(), 0);
+        assert!(la.monomials().is_empty());
+        assert_eq!(la.var_bounds("nope"), (None, None));
+        assert!(la.register(7, &le(rv("x"), int(5))));
+        assert!(la.register(-4, &ge(rv("x"), int(1))));
+        assert_eq!(la.num_atoms(), 2);
+        assert_eq!(la.atom_lit(0), 7);
+        assert_eq!(la.atom_lit(1), -4);
+        assert_eq!(la.var_bounds("x"), (None, None));
+        la.assign(7).unwrap();
+        assert_eq!(la.var_bounds("x"), (None, Some(q(5))));
+        la.assign(4).unwrap();
+        assert_eq!(la.var_bounds("x"), (Some(q(1)), Some(q(5))));
+        // A non-comparison is rejected and registers nothing.
+        assert!(!la.register(9, &int(3)));
+        assert_eq!(la.num_atoms(), 2);
+    }
+
+    #[test]
+    fn pivots_are_counted_when_the_tableau_is_repaired() {
+        let mut la = LinArith::new();
+        la.register(1, &le(add(rv("x"), rv("y")), int(2)));
+        la.register(2, &ge(rv("x"), int(3)));
+        assert!(!conflicts(&mut la, &[1, 2]));
+        assert!(la.pivots() >= 1);
+        let m = la.assignments();
+        let get = |n: &str| m.iter().find(|(k, _)| k == n).unwrap().1.clone();
+        assert!(get("x") >= num_rational::BigRational::from_integer(3.into()));
+        assert!(get("x") + get("y") <= num_rational::BigRational::from_integer(2.into()));
+    }
+
+    #[test]
+    fn product_of_two_ints_is_an_integer_monomial() {
+        // x*y <= 5/2: integer product rounds the bound to 2, a real one keeps 5/2.
+        let cases = [
+            (iv("x"), iv("y"), true, q(2)),
+            (
+                iv("x"),
+                rv("y"),
+                false,
+                Q::from_big(&num_rational::BigRational::new(5.into(), 2.into())),
+            ),
+            (
+                rv("x"),
+                iv("y"),
+                false,
+                Q::from_big(&num_rational::BigRational::new(5.into(), 2.into())),
+            ),
+        ];
+        for (x, y, is_int, bound) in cases {
+            let mut la = LinArith::new();
+            assert!(la.register(1, &le(mul(x, y), half(5))));
+            assert_eq!(la.monomials().len(), 1);
+            assert_eq!(la.monomials()[0].name, "__mul_0");
+            assert!(!la.nonlinear);
+            let dl = la.take_dl().expect("single variable atom has a DL form");
+            assert_eq!(dl.int_row, is_int);
+            assert_eq!(dl.bound, bound);
+        }
+        // y*x reuses the monomial of x*y.
+        let mut la = LinArith::new();
+        la.register(1, &le(mul(iv("x"), iv("y")), int(3)));
+        la.register(2, &le(mul(iv("y"), iv("x")), int(4)));
+        assert_eq!(la.monomials().len(), 1);
+    }
+
+    #[test]
+    fn division_by_constant_is_linear_and_by_zero_is_abstracted() {
+        let mut la = LinArith::new();
+        assert!(la.register(1, &le(Expr::Div(b(rv("x")), b(int(2))), int(1))));
+        assert!(!la.abstracted);
+        let dl = la.take_dl().unwrap();
+        assert_eq!(dl.bound, q(2)); // x/2 <= 1  ==  x <= 2
+        assert_eq!(dl.op, DlOp::Le);
+
+        let mut la = LinArith::new();
+        assert!(la.register(1, &le(Expr::Div(b(rv("x")), b(int(0))), int(1))));
+        assert!(la.abstracted);
+        assert!(!la.nonlinear);
+    }
+
+    #[test]
+    fn cancelling_terms_leave_a_constant_atom() {
+        let mut la = LinArith::new();
+        // x - x <= 3 is the constant comparison 0 <= 3.
+        assert!(la.register(1, &le(sub(rv("x"), rv("x")), int(3))));
+        assert!(la.take_dl().is_none());
+        assert!(la.assign(1).is_ok());
+        let mut la2 = LinArith::new();
+        la2.register(1, &le(sub(rv("x"), rv("x")), int(3)));
+        assert_eq!(la2.assign(-1), Err(vec![1]));
+        assert_eq!(la2.conflicts, 1);
+    }
+
+    #[test]
+    fn difference_logic_shapes() {
+        // x <= 5: unary.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        let dl = la.take_dl().unwrap();
+        assert_eq!(
+            (dl.u, dl.v, dl.op, dl.bound.clone()),
+            (0, None, DlOp::Le, q(5))
+        );
+        assert!(la.take_dl().is_none(), "take_dl consumes the atom");
+        // x - y < 3 : binary difference.
+        la.register(2, &lt(sub(rv("x"), rv("y")), int(3)));
+        let dl = la.take_dl().unwrap();
+        assert_eq!((dl.u, dl.v, dl.op), (0, Some(1), DlOp::Lt));
+        assert_eq!(dl.bound, q(3));
+        // y - x < 3 is normalised to x - y > -3 (leading coefficient positive).
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("a"), rv("b")));
+        let dl = la.take_dl().unwrap();
+        assert_eq!((dl.u, dl.v, dl.op), (0, Some(1), DlOp::Le));
+        assert_eq!(dl.bound, q(0));
+        // x + y and x - 2y are not difference constraints.
+        for e in [
+            le(add(rv("x"), rv("y")), int(5)),
+            le(sub(rv("x"), mul(int(2), rv("y"))), int(5)),
+            le(add(iv("x"), iv("y")), int(5)),
+        ] {
+            let mut la = LinArith::new();
+            la.register(1, &e);
+            assert!(la.take_dl().is_none());
+        }
+        // 2x - 2y <= 3 over the integers scales to x - y <= 1.
+        let mut la = LinArith::new();
+        la.register(
+            1,
+            &le(sub(mul(int(2), iv("x")), mul(int(2), iv("y"))), int(3)),
+        );
+        let dl = la.take_dl().unwrap();
+        assert_eq!((dl.v, dl.op, dl.int_row), (Some(1), DlOp::Le, true));
+        assert_eq!(dl.bound, q(1));
+        // Strict integer inequality never reaches the simplex: x < 3 is x <= 2.
+        let mut la = LinArith::new();
+        la.register(1, &lt(iv("x"), int(3)));
+        let dl = la.take_dl().unwrap();
+        assert_eq!((dl.op, dl.bound.clone()), (DlOp::Le, q(2)));
+        let mut la = LinArith::new();
+        la.register(1, &Expr::Gt(b(iv("x")), b(int(3))));
+        let dl = la.take_dl().unwrap();
+        assert_eq!((dl.op, dl.bound.clone()), (DlOp::Ge, q(4)));
+    }
+
+    #[test]
+    fn multi_variable_rows_are_not_confused_with_a_variable() {
+        let mut la = LinArith::new();
+        la.register(1, &le(add(rv("x"), rv("y")), int(5)));
+        la.assign(1).unwrap();
+        // The bound belongs to the row x + y, not to x or y.
+        assert_eq!(la.var_bounds("x"), (None, None));
+        assert_eq!(la.var_bounds("y"), (None, None));
+        // Same polynomial, different atoms: they share the row, so they conflict.
+        let mut la = LinArith::new();
+        la.register(1, &le(add(rv("x"), rv("y")), int(5)));
+        la.register(2, &ge(add(rv("x"), rv("y")), int(7)));
+        assert!(conflicts(&mut la, &[1, 2]));
+        // A single variable is its own simplex variable.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &ge(rv("x"), int(7)));
+        assert!(conflicts(&mut la, &[1, 2]));
+    }
+
+    #[test]
+    fn strict_bounds_conflict_with_their_closure() {
+        // x < 5 and x >= 5.
+        let mut la = LinArith::new();
+        la.register(1, &lt(rv("x"), int(5)));
+        la.register(2, &ge(rv("x"), int(5)));
+        assert!(conflicts(&mut la, &[1, 2]));
+        // x > 5 and x <= 5.
+        let mut la = LinArith::new();
+        la.register(1, &Expr::Gt(b(rv("x")), b(int(5))));
+        la.register(2, &le(rv("x"), int(5)));
+        assert!(conflicts(&mut la, &[1, 2]));
+        // x < 5 and x > 4 is satisfiable over the reals.
+        let mut la = LinArith::new();
+        la.register(1, &lt(rv("x"), int(5)));
+        la.register(2, &Expr::Gt(b(rv("x")), b(int(4))));
+        assert!(!conflicts(&mut la, &[1, 2]));
+        // not(x >= 5) ^ x >= 5 and not(x > 5) ^ x > 5.
+        let mut la = LinArith::new();
+        la.register(1, &ge(rv("x"), int(5)));
+        assert!(conflicts(&mut la, &[1, -1]) || { la.assign(1).is_err() });
+    }
+
+    #[test]
+    fn equality_on_integer_rows_needs_an_integer_point() {
+        // Int x = 5/2 has no solution; Real x = 5/2 has.
+        let mut la = LinArith::new();
+        la.register(1, &eq(iv("x"), half(5)));
+        assert!(conflicts(&mut la, &[1]));
+        let mut la = LinArith::new();
+        la.register(1, &eq(rv("x"), half(5)));
+        assert!(!conflicts(&mut la, &[1]));
+        // Int x = 5 pins both bounds; Real x = 5 as well.
+        for x in [iv("x"), rv("x")] {
+            let mut la = LinArith::new();
+            la.register(1, &eq(x, int(5)));
+            assert!(!conflicts(&mut la, &[1]));
+            assert_eq!(la.var_bounds("x"), (Some(q(5)), Some(q(5))));
+        }
+        // A false equality asserts nothing.
+        let mut la = LinArith::new();
+        la.register(1, &eq(rv("x"), int(5)));
+        la.assign(-1).unwrap();
+        assert_eq!(la.var_bounds("x"), (None, None));
+    }
+
+    #[test]
+    fn negated_atoms_use_integer_or_strict_bounds() {
+        // Integer: not(x <= 5) is x >= 6 (not merely x > 5).
+        let mut la = LinArith::new();
+        la.register(1, &le(iv("x"), int(5)));
+        la.assign(-1).unwrap();
+        assert_eq!(la.var_bounds("x"), (Some(q(6)), None));
+        // Integer: not(x >= 5) is x <= 4.
+        let mut la = LinArith::new();
+        la.register(1, &ge(iv("x"), int(5)));
+        la.assign(-1).unwrap();
+        assert_eq!(la.var_bounds("x"), (None, Some(q(4))));
+        // Real: not(x <= 5) is x > 5, compatible with x <= 11/2.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &le(rv("x"), half(11)));
+        assert!(!conflicts(&mut la, &[-1, 2]));
+        // Real: not(x >= 5) is x < 5, compatible with x >= 9/2.
+        let mut la = LinArith::new();
+        la.register(1, &ge(rv("x"), int(5)));
+        la.register(2, &ge(rv("x"), half(9)));
+        assert!(!conflicts(&mut la, &[-1, 2]));
+        // not(x < 5) is x >= 5; not(x > 5) is x <= 5.
+        let mut la = LinArith::new();
+        la.register(1, &lt(rv("x"), int(5)));
+        la.assign(-1).unwrap();
+        assert_eq!(la.var_bounds("x"), (Some(q(5)), None));
+        let mut la = LinArith::new();
+        la.register(1, &Expr::Gt(b(rv("x")), b(int(5))));
+        la.assign(-1).unwrap();
+        assert_eq!(la.var_bounds("x"), (None, Some(q(5))));
+    }
+
+    #[test]
+    fn bound_propagation_between_atoms_on_one_row() {
+        // 1: x <= 5, 2: x <= 7, 3: x >= 9, 4: x >= 3.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &le(rv("x"), int(7)));
+        la.register(3, &ge(rv("x"), int(9)));
+        la.register(4, &ge(rv("x"), int(3)));
+        la.assign(1).unwrap();
+        let out = la.check().unwrap();
+        // x <= 5 implies x <= 7 and excludes x >= 9; it says nothing on x >= 3.
+        assert_eq!(out, vec![(2, vec![2, -1]), (-3, vec![-3, -1])]);
+        assert_eq!(la.propagations, 2);
+        // Nothing left pending afterwards.
+        assert!(la.check().unwrap().is_empty());
+        assert_eq!(la.propagations, 2);
+    }
+
+    #[test]
+    fn propagation_from_a_false_atom_uses_the_negated_premise() {
+        // not(x <= 5) is x > 5, which implies x >= 3.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &ge(rv("x"), int(3)));
+        la.assign(-1).unwrap();
+        assert_eq!(la.check().unwrap(), vec![(2, vec![2, 1])]);
+        assert_eq!(la.propagations, 1);
+    }
+
+    #[test]
+    fn propagation_skips_assigned_atoms_and_constant_atoms() {
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &le(rv("x"), int(7)));
+        la.register(3, &le(sub(rv("y"), rv("y")), int(1)));
+        la.assign(2).unwrap();
+        la.assign(1).unwrap(); // atom 2 is already assigned: no lemma about it
+        let out = la.check().unwrap();
+        assert!(out.is_empty(), "{out:?}");
+        la.assign(3).unwrap();
+        assert!(la.check().unwrap().is_empty());
+        // Equality asserted false constrains nothing, hence propagates nothing.
+        let mut la = LinArith::new();
+        la.register(1, &eq(rv("x"), int(5)));
+        la.register(2, &le(rv("x"), int(7)));
+        la.assign(-1).unwrap();
+        assert!(la.check().unwrap().is_empty());
+        // Backtracking drops the pending propagations.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &le(rv("x"), int(7)));
+        la.new_level();
+        la.assign(1).unwrap();
+        la.backtrack(0);
+        assert!(la.check().unwrap().is_empty());
+        assert_eq!(la.var_bounds("x"), (None, None));
+    }
+
+    #[test]
+    fn counters_track_conflicts_and_time() {
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.register(2, &ge(rv("x"), int(7)));
+        la.assign(1).unwrap();
+        assert!(la.assign(2).is_err());
+        assert_eq!(la.conflicts, 1);
+        assert!(la.time_ns > 0 && la.time_ns < 60_000_000_000);
+        // A conflict found by `check` (row bounds against variable bounds).
+        let mut la = LinArith::new();
+        la.register(1, &le(add(rv("x"), rv("y")), int(2)));
+        la.register(2, &ge(rv("x"), int(2)));
+        la.register(3, &ge(rv("y"), int(1)));
+        la.assign(1).unwrap();
+        la.assign(2).unwrap();
+        la.assign(3).unwrap();
+        let clause = la.check().unwrap_err();
+        assert_eq!(clause, vec![-3, -2, -1]);
+        assert_eq!(la.conflicts, 1);
+        assert!(la.time_ns > 0 && la.time_ns < 60_000_000_000);
+        // check() on a consistent state adds no conflict.
+        let mut la = LinArith::new();
+        la.register(1, &le(rv("x"), int(5)));
+        la.assign(1).unwrap();
+        la.check().unwrap();
+        assert_eq!(la.conflicts, 0);
+    }
+
+    #[test]
+    fn model_and_fractional_integer_report() {
+        let mut la = LinArith::new();
+        la.register(1, &eq(mul(int(2), iv("n")), int(3)));
+        // 2n = 3 over Int: scaled row n = 3/2 has no integer point.
+        assert!(conflicts(&mut la, &[1]));
+        let mut la = LinArith::new();
+        la.register(1, &ge(rv("x"), int(3)));
+        la.assign(1).unwrap();
+        la.check().unwrap();
+        let m = la.assignments();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].0, "x");
+        assert!(m[0].1 >= num_rational::BigRational::from_integer(3.into()));
+        assert!(la.fractional_int().is_none());
+    }
+}

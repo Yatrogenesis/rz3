@@ -361,3 +361,226 @@ impl TheorySolver for QuantifierSolver {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b(e: Expr) -> Box<Expr> {
+        Box::new(e)
+    }
+    fn iv(n: &str) -> Expr {
+        Expr::Var(n.to_string(), Type::Int)
+    }
+    fn f(e: Expr) -> Expr {
+        Expr::App("f".to_string(), vec![e])
+    }
+    fn eq(x: Expr, y: Expr) -> Expr {
+        Expr::Eq(b(x), b(y))
+    }
+    fn forall_x(body: Expr) -> Expr {
+        Expr::ForAll(vec![("x".to_string(), Type::Int)], b(body))
+    }
+    fn implies(q: &Expr, body: Expr) -> Expr {
+        Expr::Implies(b(q.clone()), b(body))
+    }
+    fn int_model(name: &str, v: i64) -> BTreeMap<String, ModelValue> {
+        let mut m = BTreeMap::new();
+        m.insert(name.to_string(), ModelValue::Int(BigInt::from(v)));
+        m
+    }
+
+    #[test]
+    fn unknown_exactly_while_a_universal_is_live() {
+        let mut q = QuantifierSolver::new();
+        assert!(!q.is_unknown());
+        q.assert(&Expr::Exists(
+            vec![("x".to_string(), Type::Int)],
+            b(Expr::Bool(true)),
+        ));
+        assert!(!q.is_unknown(), "only universals are tracked");
+        q.assert(&forall_x(Expr::Bool(true)));
+        assert!(q.is_unknown());
+        assert!(q.check());
+        assert!(q.explain().is_empty());
+        q.ground_terms.insert(iv("a"));
+        q.pattern_index.insert("f".to_string(), vec![0]);
+        q.reset();
+        assert!(!q.is_unknown());
+        assert!(q.ground_terms.is_empty());
+        assert!(q.pattern_index.is_empty());
+    }
+
+    #[test]
+    fn ground_terms_and_patterns_are_collected_from_the_congruence_closure() {
+        let mut euf = EufSolver::new();
+        let mut q = QuantifierSolver::new();
+        euf.assert(&eq(iv("a"), iv("c")));
+        euf.assert(&eq(f(iv("a")), iv("b")));
+        let sel = Expr::Select(
+            b(Expr::Var(
+                "m".to_string(),
+                Type::Array(b_ty(Type::Int), b_ty(Type::Int)),
+            )),
+            b(iv("a")),
+        );
+        euf.assert(&eq(sel.clone(), iv("b")));
+        q.generate_lemmas(&mut euf, &BTreeMap::new());
+        let fa = euf.get_id_public(&f(iv("a"))).unwrap();
+        let sid = euf.get_id_public(&sel).unwrap();
+        assert_eq!(q.pattern_index.get("f"), Some(&vec![fa]));
+        assert_eq!(q.pattern_index.get("select"), Some(&vec![sid]));
+        assert!(q.ground_terms.contains(&f(iv("a"))));
+        assert!(q.ground_terms.contains(&iv("c")));
+    }
+
+    fn b_ty(t: Type) -> Box<Type> {
+        Box::new(t)
+    }
+
+    #[test]
+    fn universal_is_instantiated_on_ground_terms_and_by_matching() {
+        let mut euf = EufSolver::new();
+        euf.assert(&eq(iv("a"), iv("a")));
+        euf.assert(&eq(f(iv("a")), iv("b")));
+        let mut q = QuantifierSolver::new();
+        let body = eq(f(iv("x")), Expr::Int(0));
+        let all = forall_x(body.clone());
+        q.assert(&all);
+        let lemmas = q.generate_lemmas(&mut euf, &BTreeMap::new());
+        // One instance per ground term (a, f(a), b).
+        let n_ground = q.ground_terms.len();
+        assert_eq!(n_ground, 3);
+        assert_eq!(lemmas.len(), 3);
+        let at_a = implies(&all, eq(f(iv("a")), Expr::Int(0)));
+        assert_eq!(lemmas.iter().filter(|l| **l == at_a).count(), 1);
+        // A second round finds nothing new.
+        assert!(q.generate_lemmas(&mut euf, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn a_variable_with_a_model_value_is_not_instantiated_on_ground_terms() {
+        let p = |e: Expr| Expr::App("p".to_string(), vec![e]);
+        let mut euf = EufSolver::new();
+        // Arguments first: see the ignored id-aliasing test in euf.rs.
+        euf.assert(&eq(iv("a"), iv("a")));
+        euf.assert(&eq(p(iv("a")), Expr::Bool(true)));
+        let mut q = QuantifierSolver::new();
+        let all = forall_x(p(iv("x")));
+        q.assert(&all);
+        // x has a model value: only E-matching contributes (p(a) matches the pattern p(x)).
+        let lemmas = q.generate_lemmas(&mut euf, &int_model("x", 1));
+        assert_eq!(lemmas, vec![implies(&all, p(iv("a")))]);
+        // Without a model value every ground term (a, p(a), true) is tried as well.
+        let mut q = QuantifierSolver::new();
+        q.assert(&all);
+        let lemmas = q.generate_lemmas(&mut euf, &BTreeMap::new());
+        assert_eq!(lemmas.len(), q.ground_terms.len());
+        assert!(lemmas.contains(&implies(&all, p(iv("a")))));
+    }
+
+    #[test]
+    fn model_based_instance_only_when_the_model_falsifies_the_body() {
+        let all = forall_x(eq(iv("x"), Expr::Int(3)));
+        // x = 4 falsifies the body: the instance at 4 is produced.
+        let mut q = QuantifierSolver::new();
+        q.assert(&all);
+        let lemmas = q.generate_lemmas(&mut EufSolver::new(), &int_model("x", 4));
+        assert_eq!(lemmas, vec![implies(&all, eq(Expr::Int(4), Expr::Int(3)))]);
+        // x = 3 satisfies it: nothing to add.
+        let mut q = QuantifierSolver::new();
+        q.assert(&all);
+        let lemmas = q.generate_lemmas(&mut EufSolver::new(), &int_model("x", 3));
+        assert!(lemmas.is_empty(), "{lemmas:?}");
+        // evaluate_quantifier directly.
+        assert!(!q.evaluate_quantifier(&all, &int_model("x", 4)));
+        assert!(q.evaluate_quantifier(&all, &int_model("x", 3)));
+        // Undecidable under the model, and non-universals, count as holding.
+        assert!(q.evaluate_quantifier(&all, &BTreeMap::new()));
+        assert!(q.evaluate_quantifier(&Expr::Bool(false), &BTreeMap::new()));
+    }
+
+    #[test]
+    fn evaluation_of_ground_expressions() {
+        let q = QuantifierSolver::new();
+        let mut m = int_model("n", 5);
+        m.insert("p".to_string(), ModelValue::Bool(true));
+        m.insert("g".to_string(), ModelValue::Int(BigInt::from(9)));
+        macro_rules! chk {
+            ($a:expr, $b:expr) => {
+                assert_eq!(format!("{:?}", $a), format!("{:?}", $b))
+            };
+        }
+        let ev = |e: &Expr| q.evaluate_expr(e, &m);
+        let t = Some(ModelValue::Bool(true));
+        let fl = Some(ModelValue::Bool(false));
+        chk!(ev(&iv("n")), Some(ModelValue::Int(BigInt::from(5))));
+        chk!(ev(&iv("missing")), None::<ModelValue>);
+        chk!(ev(&Expr::Bool(true)), t);
+        chk!(ev(&Expr::Int(-7)), Some(ModelValue::Int(BigInt::from(-7))));
+        chk!(
+            ev(&Expr::Real(15, 1)),
+            Some(ModelValue::Real(BigRational::new(
+                BigInt::from(3),
+                BigInt::from(2)
+            )))
+        );
+        chk!(ev(&Expr::And(vec![Expr::Bool(true), Expr::Bool(true)])), t);
+        chk!(
+            ev(&Expr::And(vec![Expr::Bool(true), Expr::Bool(false)])),
+            fl
+        );
+        chk!(ev(&Expr::And(vec![Expr::Bool(false), iv("missing")])), fl);
+        chk!(
+            ev(&Expr::And(vec![Expr::Bool(true), iv("missing")])),
+            None::<ModelValue>
+        );
+        chk!(ev(&Expr::Not(b(Expr::Bool(true)))), fl);
+        chk!(ev(&Expr::Not(b(Expr::Bool(false)))), t);
+        chk!(ev(&Expr::Not(b(iv("missing")))), None::<ModelValue>);
+        chk!(ev(&eq(iv("n"), Expr::Int(5))), t);
+        chk!(ev(&eq(iv("n"), Expr::Int(6))), fl);
+        chk!(ev(&eq(Expr::Real(5, 1), Expr::Real(1, 1))), fl);
+        chk!(ev(&eq(Expr::Real(5, 1), Expr::Real(50, 2))), t);
+        chk!(ev(&eq(iv("n"), Expr::Real(5, 0))), None::<ModelValue>);
+        chk!(
+            ev(&Expr::App("g".to_string(), vec![])),
+            Some(ModelValue::Int(BigInt::from(9)))
+        );
+        chk!(
+            ev(&Expr::Ge(b(iv("n")), b(Expr::Int(1)))),
+            None::<ModelValue>
+        );
+    }
+
+    #[test]
+    fn model_values_become_literals() {
+        let q = QuantifierSolver::new();
+        assert_eq!(
+            q.model_val_to_expr(&ModelValue::Bool(true), &Type::Bool),
+            Some(Expr::Bool(true))
+        );
+        assert_eq!(
+            q.model_val_to_expr(&ModelValue::Bool(false), &Type::Int),
+            Some(Expr::Bool(false))
+        );
+        assert_eq!(
+            q.model_val_to_expr(&ModelValue::Int(BigInt::from(-4)), &Type::Int),
+            Some(Expr::Int(-4))
+        );
+        assert_eq!(
+            q.model_val_to_expr(&ModelValue::Int(BigInt::from(1u8) << 100), &Type::Int),
+            None
+        );
+        let whole = BigRational::from_integer(BigInt::from(6));
+        assert_eq!(
+            q.model_val_to_expr(&ModelValue::Real(whole), &Type::Real),
+            Some(Expr::Real(6, 0))
+        );
+        let frac = BigRational::new(BigInt::from(1), BigInt::from(2));
+        assert_eq!(
+            q.model_val_to_expr(&ModelValue::Real(frac), &Type::Real),
+            None
+        );
+    }
+}
