@@ -394,3 +394,282 @@ fn format_bits(value: &num_bigint::BigUint, width: usize) -> String {
         digits
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rz3::ast::fp::{FloatClass, FloatSort, FloatValue};
+
+    fn b(e: Expr) -> Box<Expr> {
+        Box::new(e)
+    }
+    fn x() -> Expr {
+        Expr::Var("x".to_string(), Type::Int)
+    }
+    fn bits(v: u64, w: usize) -> Expr {
+        Expr::BvConst(BigUint::from(v), w)
+    }
+    fn rat(n: i64, d: i64) -> BigRational {
+        BigRational::new(BigInt::from(n), BigInt::from(d))
+    }
+    fn fp(e: u16, s: u16, class: FloatClass) -> FloatValue {
+        FloatValue {
+            sort: FloatSort {
+                exponent_bits: e,
+                significand_bits: s,
+            },
+            class,
+        }
+    }
+
+    #[test]
+    fn rational_formatting() {
+        assert_eq!(format_rational(&rat(0, 1)), "0.0");
+        assert_eq!(format_rational(&rat(3, 1)), "3.0");
+        assert_eq!(format_rational(&rat(-3, 1)), "(- 3.0)");
+        assert_eq!(format_rational(&rat(1, 2)), "(/ 1.0 2.0)");
+        assert_eq!(format_rational(&rat(-1, 2)), "(- (/ 1.0 2.0))");
+        assert_eq!(format_rational(&rat(14, 4)), "(/ 7.0 2.0)");
+        assert_eq!(format_rational(&rat(-7, 3)), "(- (/ 7.0 3.0))");
+        assert_eq!(format_rational(&rat(10, 1)), "10.0");
+    }
+
+    #[test]
+    fn integer_formatting() {
+        assert_eq!(format_integer(&BigInt::from(0)), "0");
+        assert_eq!(format_integer(&BigInt::from(5)), "5");
+        assert_eq!(format_integer(&BigInt::from(-5)), "(- 5)");
+        let big: BigInt = "-123456789012345678901234567890".parse().unwrap();
+        assert_eq!(format_integer(&big), "(- 123456789012345678901234567890)");
+    }
+
+    #[test]
+    fn bit_pattern_formatting() {
+        let v = |n: u64| BigUint::from(n);
+        assert_eq!(format_bits(&v(0), 4), "#b0000");
+        assert_eq!(format_bits(&v(0), 1), "#b0");
+        assert_eq!(format_bits(&v(1), 1), "#b1");
+        assert_eq!(format_bits(&v(5), 4), "#b0101");
+        assert_eq!(format_bits(&v(15), 4), "#b1111");
+        assert_eq!(format_bits(&v(5), 8), "#b00000101");
+        // a pattern wider than the declared width is printed in full, never truncated
+        assert_eq!(format_bits(&v(5), 2), "#b101");
+        let wide = BigUint::from(1u8) << 99u32;
+        assert_eq!(format_bits(&wide, 100), format!("#b1{}", "0".repeat(99)));
+        assert_eq!(format_biguint_bits(&v(5), 8), "00000101");
+        assert_eq!(format_biguint_bits(&v(5), 3), "101");
+        assert_eq!(format_biguint_bits(&v(5), 2), "101");
+        assert_eq!(format_biguint_bits(&v(0), 1), "0");
+        assert_eq!(format_biguint_bits(&v(0), 3), "000");
+    }
+
+    #[test]
+    fn decimal_formatting() {
+        assert_eq!(format_decimal(0, 0), "0");
+        assert_eq!(format_decimal(5, 0), "5");
+        assert_eq!(format_decimal(-5, 0), "-5");
+        assert_eq!(format_decimal(25, 1), "2.5");
+        assert_eq!(format_decimal(-25, 1), "-2.5");
+        assert_eq!(format_decimal(5, 1), "0.5");
+        assert_eq!(format_decimal(-5, 1), "-0.5");
+        assert_eq!(format_decimal(25, 2), "0.25");
+        assert_eq!(format_decimal(-25, 2), "-0.25");
+        assert_eq!(format_decimal(5, 3), "0.005");
+        assert_eq!(format_decimal(12345, 2), "123.45");
+        assert_eq!(format_decimal(100, 2), "1.00");
+        assert_eq!(format_decimal(1000, 2), "10.00");
+        assert_eq!(format_decimal(0, 2), "0.00");
+        assert_eq!(format_decimal(i64::MIN, 0), "-9223372036854775808");
+        assert_eq!(format_decimal(i64::MIN, 2), "-92233720368547758.08");
+    }
+
+    #[test]
+    fn float_formatting() {
+        let one_and_half = FloatClass::Finite {
+            negative: false,
+            value: rat(3, 2),
+        };
+        assert_eq!(
+            format_float(&fp(8, 24, one_and_half)),
+            "(fp #b0 #b01111111 #b10000000000000000000000)"
+        );
+        let neg = FloatClass::Finite {
+            negative: true,
+            value: rat(3, 4),
+        };
+        assert_eq!(
+            format_float(&fp(5, 11, neg)),
+            "(fp #b1 #b01110 #b1000000000)"
+        );
+        assert_eq!(
+            format_float(&fp(8, 24, FloatClass::PositiveZero)),
+            "(fp #b0 #b00000000 #b00000000000000000000000)"
+        );
+        assert_eq!(
+            format_float(&fp(8, 24, FloatClass::NegativeZero)),
+            "(fp #b1 #b00000000 #b00000000000000000000000)"
+        );
+        assert_eq!(
+            format_float(&fp(8, 24, FloatClass::PositiveInfinity)),
+            "(fp #b0 #b11111111 #b00000000000000000000000)"
+        );
+        assert_eq!(
+            format_float(&fp(5, 11, FloatClass::NegativeInfinity)),
+            "(fp #b1 #b11111 #b0000000000)"
+        );
+        // the three fields together always span 1 + exponent + (significand - 1) bits
+        let v = format_float(&fp(11, 53, FloatClass::PositiveZero));
+        assert_eq!(v.len(), "(fp #b0 #b #b)".len() + 11 + 52);
+    }
+
+    #[test]
+    fn model_sorts_and_values() {
+        let z = |n: i64| ModelValue::Int(BigInt::from(n));
+        assert_eq!(format_model_sort(&ModelValue::Bool(true)), "Bool");
+        assert_eq!(format_model_sort(&z(1)), "Int");
+        assert_eq!(format_model_sort(&ModelValue::Real(rat(1, 2))), "Real");
+        assert_eq!(
+            format_model_sort(&ModelValue::BitVec(BigUint::from(1u8), 12)),
+            "(_ BitVec 12)"
+        );
+        let f = ModelValue::Float(fp(8, 24, FloatClass::PositiveZero));
+        assert_eq!(format_model_sort(&f), "(_ FloatingPoint 8 24)");
+        assert_eq!(format_model_value(&ModelValue::Bool(true)), "true");
+        assert_eq!(format_model_value(&ModelValue::Bool(false)), "false");
+        assert_eq!(format_model_value(&z(-3)), "(- 3)");
+        assert_eq!(format_model_value(&z(3)), "3");
+        assert_eq!(
+            format_model_value(&ModelValue::Real(rat(-3, 2))),
+            "(- (/ 3.0 2.0))"
+        );
+        assert_eq!(
+            format_model_value(&ModelValue::BitVec(BigUint::from(5u8), 4)),
+            "#b0101"
+        );
+        assert_eq!(
+            format_model_value(&f),
+            "(fp #b0 #b00000000 #b00000000000000000000000)"
+        );
+    }
+
+    #[test]
+    fn type_formatting() {
+        let arr = Type::Array(b_ty(Type::Int), b_ty(Type::BitVec(8)));
+        assert_eq!(format_type(&Type::Unknown), "Unknown");
+        assert_eq!(format_type(&Type::Bool), "Bool");
+        assert_eq!(format_type(&Type::Int), "Int");
+        assert_eq!(format_type(&Type::Real), "Real");
+        assert_eq!(format_type(&Type::String), "String");
+        assert_eq!(format_type(&Type::BitVec(32)), "(_ BitVec 32)");
+        assert_eq!(format_type(&Type::Sort("U".to_string())), "U");
+        assert_eq!(
+            format_type(&Type::Float(FloatSort {
+                exponent_bits: 11,
+                significand_bits: 53
+            })),
+            "(_ FloatingPoint 11 53)"
+        );
+        assert_eq!(format_type(&arr), "(Array Int (_ BitVec 8))");
+        assert_eq!(
+            format_type(&Type::Fn(vec![Type::Int, Type::Bool], b_ty(Type::Real))),
+            "(-> Int Bool Real)"
+        );
+    }
+
+    fn b_ty(t: Type) -> Box<Type> {
+        Box::new(t)
+    }
+
+    #[test]
+    fn expression_echo_for_every_supported_term() {
+        let y = || Expr::Var("y".to_string(), Type::Int);
+        let p = || Expr::Var("p".to_string(), Type::Bool);
+        let v = || Expr::Var("v".to_string(), Type::BitVec(8));
+        let cases: Vec<(Expr, &str)> = vec![
+            (Expr::Bool(true), "true"),
+            (Expr::Bool(false), "false"),
+            (Expr::Int(-3), "-3"),
+            (Expr::Int(12), "12"),
+            (Expr::Real(25, 1), "2.5"),
+            (Expr::Real(-5, 2), "-0.05"),
+            (x(), "x"),
+            (bits(5, 4), "#b0101"),
+            (Expr::App("f".into(), vec![Expr::Int(1), x()]), "(f 1 x)"),
+            (Expr::Eq(b(x()), b(y())), "(= x y)"),
+            (Expr::Not(b(p())), "(not p)"),
+            (Expr::And(vec![p(), p(), p()]), "(and p p p)"),
+            (Expr::Or(vec![p(), p()]), "(or p p)"),
+            (Expr::Add(vec![x(), y(), Expr::Int(1)]), "(+ x y 1)"),
+            (Expr::Sub(vec![x(), y()]), "(- x y)"),
+            (Expr::Mul(vec![x(), y()]), "(* x y)"),
+            (Expr::Div(b(x()), b(y())), "(/ x y)"),
+            (Expr::Lt(b(x()), b(y())), "(< x y)"),
+            (Expr::Le(b(x()), b(y())), "(<= x y)"),
+            (Expr::Gt(b(x()), b(y())), "(> x y)"),
+            (Expr::Ge(b(x()), b(y())), "(>= x y)"),
+            (Expr::Ite(b(p()), b(x()), b(y())), "(ite p x y)"),
+            (Expr::BvAdd(b(v()), b(v())), "(bvadd v v)"),
+            (Expr::BvSub(b(v()), b(v())), "(bvsub v v)"),
+            (Expr::BvMul(b(v()), b(v())), "(bvmul v v)"),
+            (Expr::BvAnd(b(v()), b(v())), "(bvand v v)"),
+            (Expr::BvOr(b(v()), b(v())), "(bvor v v)"),
+            (Expr::BvXor(b(v()), b(v())), "(bvxor v v)"),
+            (Expr::BvNot(b(v())), "(bvnot v)"),
+            (Expr::BvExtract(7, 4, b(v())), "((_ extract 7 4) v)"),
+            (
+                Expr::Select(b(Expr::Var("a".into(), Type::Int)), b(Expr::Int(1))),
+                "(select a 1)",
+            ),
+            (
+                Expr::Store(
+                    b(Expr::Var("a".into(), Type::Int)),
+                    b(Expr::Int(1)),
+                    b(Expr::Int(2)),
+                ),
+                "(store a 1 2)",
+            ),
+            (Expr::StrConst("ab".into()), "\"ab\""),
+            (
+                Expr::StrConcat(vec![Expr::StrConst("a".into()), Expr::StrConst("b".into())]),
+                "(str.++ \"a\" \"b\")",
+            ),
+            (
+                Expr::StrLen(b(Expr::StrConst("a".into()))),
+                "(str.len \"a\")",
+            ),
+            (
+                Expr::StrContains(
+                    b(Expr::StrConst("ab".into())),
+                    b(Expr::StrConst("a".into())),
+                ),
+                "(str.contains \"ab\" \"a\")",
+            ),
+            (
+                Expr::ForAll(
+                    vec![("i".into(), Type::Int), ("w".into(), Type::BitVec(8))],
+                    b(Expr::Gt(
+                        b(Expr::Var("i".into(), Type::Int)),
+                        b(Expr::Int(0)),
+                    )),
+                ),
+                "(forall ((i Int) (w (_ BitVec 8))) (> i 0))",
+            ),
+            (
+                Expr::Exists(vec![("r".into(), Type::Real)], b(Expr::Bool(true))),
+                "(exists ((r Real)) true)",
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(format_expr(&e), want);
+        }
+        // nesting recurses through the same printer
+        let nested = Expr::Not(b(Expr::Eq(b(Expr::Add(vec![x(), Expr::Int(1)])), b(y()))));
+        assert_eq!(format_expr(&nested), "(not (= (+ x 1) y))");
+        assert_eq!(format_nary("and", &[]), "(and )");
+        assert_eq!(format_nary("+", &[Expr::Int(1), Expr::Int(2)]), "(+ 1 2)");
+        assert_eq!(
+            format_quantifier("forall", &[("a".into(), Type::Bool)], &Expr::Bool(true)),
+            "(forall ((a Bool)) true)"
+        );
+    }
+}
