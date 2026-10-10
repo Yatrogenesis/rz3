@@ -1,0 +1,218 @@
+# Hand-computed cases. Format: vars ; expr ; expected   (vars: name:Sort=value,...)
+# Sorts: Int, Real, Bool, bvN. Expected: true/false, integer, n/d, #b..., or unknown.
+# literals
+ ; true ; true
+ ; false ; false
+ ; 42 ; 42
+ ; 0 ; 0
+ ; 2.5 ; 5/2
+ ; 0.25 ; 1/4
+ ; 100.50 ; 201/2
+ ; 0.0 ; 0
+ ; #b1010 ; #b1010
+ ; #x0f ; #b00001111
+# variables: model value, and default when absent
+x:Int=5 ; x ; 5
+x:Int=-5 ; x ; -5
+x:Real=-7/2 ; x ; -7/2
+x:Bool=true ; x ; true
+x:Bool=false ; x ; false
+x:bv8=#x9c ; x ; #b10011100
+ ; (+ 2 3) ; 5
+# boolean connectives
+ ; (not true) ; false
+ ; (not false) ; true
+ ; (and true true) ; true
+ ; (and true false) ; false
+ ; (and false true) ; false
+ ; (and false false) ; false
+ ; (and true true true) ; true
+ ; (and true true false) ; false
+ ; (and false true true) ; false
+ ; (or false false) ; false
+ ; (or true false) ; true
+ ; (or false true) ; true
+ ; (or true true) ; true
+ ; (or false false false) ; false
+ ; (or false false true) ; true
+ ; (or true false false) ; true
+ ; (=> true true) ; true
+ ; (=> true false) ; false
+ ; (=> false true) ; true
+ ; (=> false false) ; true
+ ; (ite true 1 2) ; 1
+ ; (ite false 1 2) ; 2
+ ; (ite true 1.5 2.5) ; 3/2
+ ; (ite false 1.5 2.5) ; 5/2
+ ; (ite true #x01 #x02) ; #b00000001
+ ; (ite false #x01 #x02) ; #b00000010
+ ; (ite (< 1 2) true false) ; true
+ ; (ite (> 1 2) true false) ; false
+# equality and distinct
+ ; (= 1 1) ; true
+ ; (= 1 2) ; false
+ ; (= 1.5 1.5) ; true
+ ; (= 1.5 2.5) ; false
+ ; (= true true) ; true
+ ; (= true false) ; false
+ ; (= #x01 #x01) ; true
+ ; (= #x01 #x02) ; false
+ ; (= 2 2.0) ; true
+ ; (distinct 1 2) ; true
+ ; (distinct 1 1) ; false
+ ; (distinct 1 2 3) ; true
+ ; (distinct 1 2 1) ; false
+ ; (distinct 1 1 3) ; false
+ ; (distinct 1 2 2) ; false
+ ; (distinct #x01 #x02) ; true
+ ; (distinct #x01 #x01) ; false
+# inequalities (each operator on less / equal / greater)
+ ; (< 1 2) ; true
+ ; (< 2 2) ; false
+ ; (< 3 2) ; false
+ ; (<= 1 2) ; true
+ ; (<= 2 2) ; true
+ ; (<= 3 2) ; false
+ ; (> 1 2) ; false
+ ; (> 2 2) ; false
+ ; (> 3 2) ; true
+ ; (>= 1 2) ; false
+ ; (>= 2 2) ; true
+ ; (>= 3 2) ; true
+ ; (< 0.5 0.75) ; true
+ ; (< 0.75 0.5) ; false
+ ; (> 0.75 0.5) ; true
+ ; (>= 0.5 0.5) ; true
+ ; (<= 0.75 0.5) ; false
+ ; (< (- 3) (- 2)) ; true
+ ; (> (- 3) (- 2)) ; false
+# n-ary arithmetic
+ ; (+ 1 2 3) ; 6
+ ; (+ 1.5 2.25) ; 15/4
+ ; (+ 5 (- 7)) ; -2
+ ; (* 2 3 4) ; 24
+ ; (* 2 0.5) ; 1
+ ; (* 3 (- 4)) ; -12
+ ; (* 0.5 0.5) ; 1/4
+ ; (* 2 3) ; 6
+ ; (- 10 3 2) ; 5
+ ; (- 3 10) ; -7
+ ; (- 10 3) ; 7
+ ; (- 5) ; -5
+ ; (- 0) ; 0
+ ; (- 1.5 0.25) ; 5/4
+ ; (+ 0 0) ; 0
+# real division
+ ; (/ 7.0 2.0) ; 7/2
+ ; (/ 1.0 3.0) ; 1/3
+ ; (/ (- 1.0) 4.0) ; -1/4
+ ; (/ 6.0 (- 4.0)) ; -3/2
+ ; (/ 1.0 0.0) ; unknown
+ ; (/ 0.0 5.0) ; 0
+# integer div / mod (Euclidean)
+ ; (div 7 2) ; 3
+ ; (mod 7 2) ; 1
+ ; (div (- 7) 2) ; -4
+ ; (mod (- 7) 2) ; 1
+ ; (div 7 (- 2)) ; -3
+ ; (mod 7 (- 2)) ; 1
+ ; (div (- 7) (- 2)) ; 4
+ ; (mod (- 7) (- 2)) ; 1
+ ; (div 6 3) ; 2
+ ; (mod 6 3) ; 0
+ ; (div (- 6) 3) ; -2
+ ; (mod (- 6) 3) ; 0
+ ; (div 6 (- 3)) ; -2
+ ; (mod 6 (- 3)) ; 0
+ ; (div 0 5) ; 0
+ ; (mod 0 5) ; 0
+ ; (div 1 5) ; 0
+ ; (mod 1 5) ; 1
+ ; (div 5 5) ; 1
+ ; (mod 13 5) ; 3
+ ; (div 13 5) ; 2
+ ; (div 7 0) ; unknown
+ ; (mod 7 0) ; unknown
+ ; (div 0 0) ; unknown
+ ; (mod 0 0) ; unknown
+ ; (+ (* 5 (div 13 5)) (mod 13 5)) ; 13
+# abs, to_int, is_int, to_real
+ ; (abs 5) ; 5
+ ; (abs (- 5)) ; 5
+ ; (abs 0) ; 0
+ ; (to_int 3.5) ; 3
+ ; (to_int (- 3.5)) ; -4
+ ; (to_int 3.0) ; 3
+ ; (to_int (- 3.0)) ; -3
+ ; (to_int 0.25) ; 0
+ ; (to_int (- 0.25)) ; -1
+ ; (is_int 3.0) ; true
+ ; (is_int 3.5) ; false
+ ; (is_int (- 0.5)) ; false
+ ; (is_int 0.0) ; true
+ ; (to_real 3) ; 3
+ ; (+ (to_real 3) 0.5) ; 7/2
+ ; (is_int (to_real 4)) ; true
+ ; (to_int (/ 7.0 2.0)) ; 3
+ ; (is_int (/ 6.0 3.0)) ; true
+ ; (is_int (/ 7.0 2.0)) ; false
+# variables in arithmetic
+x:Int=3,y:Int=-4 ; (+ x y) ; -1
+x:Int=3,y:Int=-4 ; (* x y) ; -12
+x:Int=3,y:Int=-4 ; (- x y) ; 7
+x:Int=3,y:Int=-4 ; (< y x) ; true
+x:Int=3,y:Int=-4 ; (div y x) ; -2
+x:Int=3,y:Int=-4 ; (mod y x) ; 2
+x:Int=3,y:Int=-4 ; (mod x y) ; 3
+x:Real=1/2,y:Real=-1/3 ; (+ x y) ; 1/6
+x:Real=1/2,y:Real=-1/3 ; (* x y) ; -1/6
+x:Real=1/2,y:Real=-1/3 ; (/ x y) ; -3/2
+x:Real=1/2,y:Real=-1/3 ; (> x y) ; true
+x:Real=1/2 ; (is_int x) ; false
+x:Real=1/2 ; (to_int x) ; 0
+x:Bool=true,y:Bool=false ; (and x (not y)) ; true
+x:Bool=true,y:Bool=false ; (=> x y) ; false
+x:Bool=true,y:Bool=false ; (ite y 1 2) ; 2
+x:Bool=true,y:Bool=false ; (= x y) ; false
+# bit-vector variables (model width vs declared sort)
+x:bv8=#x0f,y:bv8=#xf0 ; (bvor x y) ; #b11111111
+x:bv8=#x0f,y:bv8=#xf0 ; (bvand x y) ; #b00000000
+x:bv8=#x0f,y:bv8=#xf0 ; (bvadd x y) ; #b11111111
+x:bv8=#x0f ; (bvnot x) ; #b11110000
+x:bv8=#x0f ; ((_ extract 3 0) x) ; #b1111
+x:bv8=#x0f ; (concat x x) ; #b0000111100001111
+# things the evaluator does not interpret
+ ; (forall ((i Int)) (>= (* i i) 0)) ; unknown
+ ; (exists ((i Int)) (= i 3)) ; unknown
+ ; (and true (forall ((i Int)) (>= (* i i) 0))) ; unknown
+ ; (and false (forall ((i Int)) (>= (* i i) 0))) ; unknown
+ ; (or true (exists ((i Int)) (= i 3))) ; unknown
+ ; (=> false (exists ((i Int)) (= i 3))) ; unknown
+ ; (not (exists ((i Int)) (= i 3))) ; unknown
+ ; (+ 1 (to_int (/ 1.0 0.0))) ; unknown
+ ; (< 1 (div 1 0)) ; unknown
+ ; (<= (div 1 0) 1) ; unknown
+ ; (> 1 (div 1 0)) ; unknown
+ ; (>= (div 1 0) 1) ; unknown
+ ; (ite (= (div 1 0) 1) 1 2) ; unknown
+ ; (ite true (div 1 0) 2) ; unknown
+ ; (ite false 2 (div 1 0)) ; unknown
+ ; (= (div 1 0) 1) ; unknown
+ ; (= 1 (div 1 0)) ; unknown
+ ; (+ 1 (div 1 0)) ; unknown
+ ; (+ (div 1 0) 1) ; unknown
+ ; (* 2 (div 1 0)) ; unknown
+ ; (- 2 (div 1 0)) ; unknown
+ ; (- (div 1 0) 2) ; unknown
+ ; (/ 2.0 (to_real (div 1 0))) ; unknown
+ ; (/ (to_real (div 1 0)) 2.0) ; unknown
+ ; (div (div 1 0) 2) ; unknown
+ ; (div 2 (div 1 0)) ; unknown
+ ; (mod (div 1 0) 2) ; unknown
+ ; (to_int (to_real (div 1 0))) ; unknown
+ ; (is_int (to_real (div 1 0))) ; unknown
+ ; (not (= (div 1 0) 1)) ; unknown
+ ; (and (= (div 1 0) 1) true) ; unknown
+ ; (or false (= (div 1 0) 1)) ; unknown
+ ; (=> (= (div 1 0) 1) true) ; unknown
+ ; (=> true (= (div 1 0) 1)) ; unknown
