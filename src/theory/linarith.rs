@@ -1059,4 +1059,49 @@ mod tests {
         assert!(m[0].1 >= num_rational::BigRational::from_integer(3.into()));
         assert!(la.fractional_int().is_none());
     }
+
+    #[test]
+    fn integer_scale_clears_denominators_and_common_factors() {
+        let r = |n: i64, d: i64| q(n).div(&q(d));
+        // 1/2 x + 1/3 y  ->  factor 6 (3x + 2y).
+        assert_eq!(integer_scale(&[(0, r(1, 2)), (1, r(1, 3))]), Some(q(6)));
+        // 3/4 x + 5/6 y  ->  lcm 12, numerators 9 and 10: factor 12.
+        assert_eq!(integer_scale(&[(0, r(3, 4)), (1, r(5, 6))]), Some(q(12)));
+        // 2/3 x  ->  factor 3/2 (x).
+        assert_eq!(integer_scale(&[(0, r(2, 3))]), Some(r(3, 2)));
+        // 4x + 6y  ->  factor 1/2 (2x + 3y).
+        assert_eq!(integer_scale(&[(0, q(4)), (1, q(6))]), Some(r(1, 2)));
+        // 1/4 x + 1/6 y  ->  lcm 12 (not 24): 3x + 2y.
+        assert_eq!(integer_scale(&[(0, r(1, 4)), (1, r(1, 6))]), Some(q(12)));
+        // Negative coefficients keep the factor positive.
+        assert_eq!(integer_scale(&[(0, r(-1, 2)), (1, r(1, 3))]), Some(q(6)));
+        assert_eq!(integer_scale(&[]), None);
+        assert_eq!(integer_scale(&[(0, Q::zero())]), None);
+    }
+
+    #[test]
+    fn integer_rows_are_scaled_to_coprime_coefficients() {
+        // x/2 <= 1 over Int is x <= 2.
+        let mut la = LinArith::new();
+        la.register(1, &le(Expr::Div(b(iv("x")), b(int(2))), int(1)));
+        let dl = la.take_dl().unwrap();
+        assert_eq!(
+            (dl.v, dl.op, dl.bound, dl.int_row),
+            (None, DlOp::Le, q(2), true)
+        );
+        // x/2 - y/2 <= 3/4 is x - y <= 3/2, rounded to x - y <= 1.
+        let mut la = LinArith::new();
+        la.register(
+            1,
+            &le(
+                sub(
+                    Expr::Div(b(iv("x")), b(int(2))),
+                    Expr::Div(b(iv("y")), b(int(2))),
+                ),
+                Expr::Div(b(int(3)), b(int(4))),
+            ),
+        );
+        let dl = la.take_dl().unwrap();
+        assert_eq!((dl.v, dl.op, dl.bound), (Some(1), DlOp::Le, q(1)));
+    }
 }
