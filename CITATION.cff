@@ -14,6 +14,9 @@ repository-code: "https://github.com/Yatrogenesis/rz3"
 doi: "10.5281/zenodo.20686622"
 identifiers:
   - type: doi
+    value: "10.5281/zenodo.23287042"
+    description: "Version DOI of release 0.2.0"
+  - type: doi
     value: "10.5281/zenodo.20686622"
     description: "Concept DOI (all versions)"
 keywords:

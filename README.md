@@ -139,8 +139,9 @@ input file, the `rz3` version and the other solver's version.
 
 ## Citation
 
-See `CITATION.cff`. The DOI `10.5281/zenodo.20686622` always resolves to the latest archived
-version; cite the version DOI of the release you used when reproducing results.
+See `CITATION.cff`. Version 0.2.0: DOI `10.5281/zenodo.23287042`. The concept DOI
+`10.5281/zenodo.20686622` always resolves to the latest archived version; cite the version DOI of
+the release you used when reproducing results.
 
 ## License
 
