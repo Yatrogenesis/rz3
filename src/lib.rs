@@ -28,6 +28,7 @@
 //! ```
 //!
 pub mod ast;
+pub mod bvring;
 pub mod driver;
 pub mod eval;
 pub mod parser;
@@ -37,6 +38,7 @@ pub mod tactic;
 pub mod theory;
 
 use crate::ast::{Expr, ModelValue, Type};
+use crate::bvring::BvRing;
 use crate::sat::CdclSolver;
 use crate::tactic::{Simplifier, SolveEqs, TacticEngine};
 use crate::theory::array_reduce::ArrayReducer;
@@ -225,6 +227,7 @@ impl Default for Rz3Solver {
 impl Rz3Solver {
     pub fn new() -> Self {
         let mut tactic_engine = TacticEngine::new();
+        tactic_engine.add_tactic(Box::new(BvRing));
         tactic_engine.add_tactic(Box::new(Simplifier));
         tactic_engine.add_tactic(Box::new(SolveEqs));
         Self {
@@ -323,6 +326,7 @@ impl Rz3Solver {
         self.bv_expr_to_bits = BTreeMap::new();
         self.next_sat_var = 1;
         let mut te = TacticEngine::new();
+        te.add_tactic(Box::new(BvRing));
         te.add_tactic(Box::new(Simplifier));
         te.add_tactic(Box::new(SolveEqs));
         self.tactic_engine = te;
