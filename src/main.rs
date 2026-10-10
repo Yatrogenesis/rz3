@@ -611,6 +611,97 @@ mod tests {
     }
 
     #[test]
+    fn format_expr_prints_every_operator_in_smtlib_syntax() {
+        let a8 = Expr::Var("a".to_string(), Type::BitVec(8));
+        let b8 = Expr::Var("b".to_string(), Type::BitVec(8));
+        let bin =
+            |op: fn(Box<Expr>, Box<Expr>) -> Expr| format_expr(&op(b(a8.clone()), b(b8.clone())));
+        assert_eq!(bin(Expr::BvConcat), "(concat a b)");
+        assert_eq!(bin(Expr::BvUle), "(bvule a b)");
+        assert_eq!(bin(Expr::BvUlt), "(bvult a b)");
+        assert_eq!(bin(Expr::BvSle), "(bvsle a b)");
+        assert_eq!(bin(Expr::BvSlt), "(bvslt a b)");
+        assert_eq!(bin(Expr::BvShl), "(bvshl a b)");
+        assert_eq!(bin(Expr::BvLshr), "(bvlshr a b)");
+        assert_eq!(bin(Expr::BvAshr), "(bvashr a b)");
+        assert_eq!(bin(Expr::BvUdiv), "(bvudiv a b)");
+        assert_eq!(bin(Expr::BvUrem), "(bvurem a b)");
+        assert_eq!(bin(Expr::BvSdiv), "(bvsdiv a b)");
+        assert_eq!(bin(Expr::BvSrem), "(bvsrem a b)");
+        assert_eq!(bin(Expr::BvSmod), "(bvsmod a b)");
+        assert_eq!(bin(Expr::BvAdd), "(bvadd a b)");
+        assert_eq!(format_expr(&Expr::BvNeg(b(a8.clone()))), "(bvneg a)");
+        assert_eq!(
+            format_expr(&Expr::BvZeroExt(3, b(a8.clone()))),
+            "((_ zero_extend 3) a)"
+        );
+        assert_eq!(
+            format_expr(&Expr::BvSignExt(3, b(a8.clone()))),
+            "((_ sign_extend 3) a)"
+        );
+        assert_eq!(
+            format_expr(&Expr::BvRotl(2, b(a8.clone()))),
+            "((_ rotate_left 2) a)"
+        );
+        assert_eq!(
+            format_expr(&Expr::BvRotr(2, b(a8.clone()))),
+            "((_ rotate_right 2) a)"
+        );
+        assert_eq!(
+            format_expr(&Expr::BvRepeat(2, b(a8.clone()))),
+            "((_ repeat 2) a)"
+        );
+        let (i, j) = (x(), Expr::Var("y".to_string(), Type::Int));
+        let ib =
+            |op: fn(Box<Expr>, Box<Expr>) -> Expr| format_expr(&op(b(i.clone()), b(j.clone())));
+        assert_eq!(ib(Expr::IntDiv), "(div x y)");
+        assert_eq!(ib(Expr::IntMod), "(mod x y)");
+        assert_eq!(ib(Expr::Implies), "(=> x y)");
+        assert_eq!(ib(Expr::Gt), "(> x y)");
+        assert_eq!(ib(Expr::Ge), "(>= x y)");
+        assert_eq!(format_expr(&Expr::ToInt(b(i.clone()))), "(to_int x)");
+        assert_eq!(format_expr(&Expr::IsInt(b(i.clone()))), "(is_int x)");
+        assert_eq!(
+            format_expr(&Expr::BigRat("1".to_string(), "2".to_string())),
+            "(/ 1.0 2.0)"
+        );
+        assert_eq!(
+            format_expr(&Expr::BigRat("-1".to_string(), "2".to_string())),
+            "(- (/ 1.0 2.0))"
+        );
+        assert_eq!(
+            format_expr(&Expr::Ite(b(Expr::Bool(true)), b(i.clone()), b(j.clone()))),
+            "(ite true x y)"
+        );
+        assert_eq!(
+            format_expr(&Expr::Store(
+                b(Expr::Var("A".to_string(), Type::Int)),
+                b(i.clone()),
+                b(j)
+            )),
+            "(store A x y)"
+        );
+        assert_eq!(
+            format_expr(&Expr::ForAll(
+                vec![("q".to_string(), Type::Int)],
+                b(Expr::Bool(true))
+            )),
+            "(forall ((q Int)) true)"
+        );
+        assert_eq!(
+            format_expr(&Expr::Exists(
+                vec![("q".to_string(), Type::Int)],
+                b(Expr::Bool(false))
+            )),
+            "(exists ((q Int)) false)"
+        );
+        assert_eq!(
+            format_expr(&Expr::StrLen(b(Expr::StrConst("ab".to_string())))),
+            "(str.len \"ab\")"
+        );
+    }
+
+    #[test]
     fn expression_echo_for_every_supported_term() {
         let y = || Expr::Var("y".to_string(), Type::Int);
         let p = || Expr::Var("p".to_string(), Type::Bool);
