@@ -1121,3 +1121,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "fp_z3_oracle_tests.rs"]
+mod z3_oracle_tests;
