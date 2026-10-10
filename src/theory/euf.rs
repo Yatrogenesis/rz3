@@ -84,7 +84,8 @@ impl EufSolver {
             return id;
         }
 
-        let id = self.id_to_node.len();
+        // Register the arguments first: they allocate ids of their own, and this node's id must be
+        // taken afterwards (taking it before made `f(c)` share the id of a fresh argument `c`).
         let node = match expr {
             Expr::Var(name, _) => Node::Var(name.clone()),
             Expr::App(name, args) => {
@@ -92,16 +93,19 @@ impl EufSolver {
                 for arg in args {
                     arg_ids.push(self.get_id(arg));
                 }
-                for &arg_id in &arg_ids {
-                    while self.use_list.len() <= arg_id {
-                        self.use_list.push(Vec::new());
-                    }
-                    self.use_list[arg_id].push(id);
-                }
                 Node::App(name.clone(), arg_ids)
             }
             _ => Node::Var(format!("{:?}", expr)),
         };
+        let id = self.id_to_node.len();
+        if let Node::App(_, arg_ids) = &node {
+            for &arg_id in arg_ids {
+                while self.use_list.len() <= arg_id {
+                    self.use_list.push(Vec::new());
+                }
+                self.use_list[arg_id].push(id);
+            }
+        }
 
         self.expr_to_id.insert(expr.clone(), id);
         self.id_to_node.push(node);
@@ -504,7 +508,6 @@ mod tests {
     /// arguments of an application, so a fresh argument receives the same id as the
     /// application itself and `f(c)` is merged with `c` in the id table.
     #[test]
-    #[ignore = "get_id assigns the same id to a new application and its fresh argument"]
     fn fresh_argument_does_not_alias_its_application() {
         let mut s = EufSolver::new();
         s.assert(&eq(f(v("a")), f(v("c"))));
