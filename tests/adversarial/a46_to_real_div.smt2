@@ -1,0 +1,6 @@
+(set-logic QF_NIRA)
+(declare-const x Int)(declare-const y Int)
+(assert (distinct y 0))
+(assert (= (/ (to_real x) (to_real y)) 0.5))
+(assert (> y 10))
+(check-sat)(get-model)

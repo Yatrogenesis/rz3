@@ -1,5 +1,4 @@
 use crate::ast::Expr;
-use std::collections::BTreeMap;
 
 pub trait Tactic {
     fn apply(&self, expr: Expr) -> Expr;
@@ -15,41 +14,16 @@ impl Tactic for Simplifier {
 pub struct SolveEqs;
 
 impl Tactic for SolveEqs {
+    /// Equation solving is deliberately a no-op.
+    ///
+    /// The previous implementation removed every top-level `x = term` conjunct and
+    /// substituted into the rest through a map keyed by variable. That is only sound
+    /// for a single, acyclic definition per variable: `x=1 ∧ x=2` lost one equation
+    /// (answered sat), and `x=y+1 ∧ y=x+1` (or `a=b ∧ b=c ∧ a ∧ ¬c`) lost both
+    /// (answered sat). Eliminating equations is an optimisation, never a requirement;
+    /// the SAT/theory loop handles them directly.
     fn apply(&self, expr: Expr) -> Expr {
-        match expr {
-            Expr::And(args) => {
-                let mut substs = BTreeMap::new();
-                let mut remaining = Vec::new();
-                for arg in args {
-                    if let Expr::Eq(a, b) = &arg {
-                        let (var, term) = match (&**a, &**b) {
-                            (Expr::Var(name, _), term) if !term.contains_var(name) => {
-                                (name.clone(), term.clone())
-                            }
-                            (term, Expr::Var(name, _)) if !term.contains_var(name) => {
-                                (name.clone(), term.clone())
-                            }
-                            _ => {
-                                remaining.push(arg);
-                                continue;
-                            }
-                        };
-                        substs.insert(var, term);
-                    } else {
-                        remaining.push(arg);
-                    }
-                }
-                if substs.is_empty() {
-                    return Expr::And(remaining);
-                }
-                let mut finalized = Vec::new();
-                for expr in remaining {
-                    finalized.push(expr.substitute(&substs));
-                }
-                Expr::And(finalized)
-            }
-            _ => expr,
-        }
+        expr
     }
 }
 
@@ -114,16 +88,24 @@ impl Simplifier {
                 }
             }
             Expr::Add(args) => {
+                // Constants are folded with checked i64 arithmetic. On overflow the term is
+                // left exactly as written (the arithmetic theory is exact), never wrapped.
+                let original = args.clone();
                 let mut new_args = Vec::new();
-                let mut const_sum = 0;
+                let mut const_sum: i64 = 0;
+                let mut overflow = false;
+                let mut fold = |sum: &mut i64, v: i64| match sum.checked_add(v) {
+                    Some(x) => *sum = x,
+                    None => overflow = true,
+                };
                 for arg in args {
                     let simplified = Self::simplify(arg);
                     match simplified {
-                        Expr::Int(val) => const_sum += val,
+                        Expr::Int(val) => fold(&mut const_sum, val),
                         Expr::Add(inner_args) => {
                             for ia in inner_args {
                                 if let Expr::Int(v) = ia {
-                                    const_sum += v;
+                                    fold(&mut const_sum, v);
                                 } else {
                                     new_args.push(ia);
                                 }
@@ -131,6 +113,9 @@ impl Simplifier {
                         }
                         _ => new_args.push(simplified),
                     }
+                }
+                if overflow {
+                    return Expr::Add(original);
                 }
                 if new_args.is_empty() {
                     return Expr::Int(const_sum);
@@ -158,22 +143,30 @@ impl Simplifier {
                 if simplified_args.len() == 2 {
                     if let (Expr::Int(a), Expr::Int(b)) = (&simplified_args[0], &simplified_args[1])
                     {
-                        return Expr::Int(a - b);
+                        if let Some(d) = a.checked_sub(*b) {
+                            return Expr::Int(d);
+                        }
                     }
                 }
                 Expr::Sub(simplified_args)
             }
             Expr::Mul(args) => {
+                let original = args.clone();
                 let mut new_args = Vec::new();
-                let mut const_prod = 1;
+                let mut const_prod: i64 = 1;
                 let mut has_const = false;
+                let mut overflow = false;
+                let mut fold = |prod: &mut i64, v: i64| match prod.checked_mul(v) {
+                    Some(x) => *prod = x,
+                    None => overflow = true,
+                };
                 for arg in args {
                     let simplified = Self::simplify(arg);
                     match simplified {
                         Expr::Int(0) => return Expr::Int(0),
                         Expr::Int(1) => continue,
                         Expr::Int(val) => {
-                            const_prod *= val;
+                            fold(&mut const_prod, val);
                             has_const = true;
                         }
                         Expr::Mul(inner_args) => {
@@ -183,7 +176,7 @@ impl Simplifier {
                                         return Expr::Int(0);
                                     }
                                     if v != 1 {
-                                        const_prod *= v;
+                                        fold(&mut const_prod, v);
                                         has_const = true;
                                     }
                                 } else {
@@ -193,6 +186,9 @@ impl Simplifier {
                         }
                         _ => new_args.push(simplified),
                     }
+                }
+                if overflow {
+                    return Expr::Mul(original);
                 }
                 if new_args.is_empty() {
                     return Expr::Int(if has_const { const_prod } else { 1 });

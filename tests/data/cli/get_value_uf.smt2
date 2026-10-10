@@ -1,0 +1,6 @@
+(declare-fun f (Int) Int)
+(declare-const x Int)
+(assert (= x 7))
+(assert (= (f x) 11))
+(check-sat)
+(get-value ((f x) (f 7)))

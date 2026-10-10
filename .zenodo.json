@@ -7,9 +7,9 @@
       "orcid": "0009-0008-6093-8267"
     }
   ],
-  "license": "Apache-2.0",
+  "license": "mit",
   "access_right": "open",
-  "description": "rz3 is a pure-Rust SMT (Satisfiability Modulo Theories) solver built on a DPLL(T)/CDCL architecture. It computes over arbitrary-precision rationals (no floating-point in the decision core), is deterministic run-to-run (verified by an n=30 bit-identical harness), and has zero native dependencies, so it deploys to WebAssembly. Its linear-arithmetic core uses exact rationals, symbolic strict bounds and deterministic pivoting, with regression coverage for termination-sensitive cases. Some unresolved degenerate or disequality-heavy cases may return Unknown. Dual-licensed under MIT OR Apache-2.0.",
+  "description": "rz3 is a research-prototype SMT (Satisfiability Modulo Theories) solver written in Rust with no native dependencies. A CDCL SAT core drives theory solvers (DPLL(T)) for a subset of SMT-LIB 2.6: linear and non-linear arithmetic over arbitrary-precision rationals, uninterpreted functions and sorts, arrays, bit-vectors and ground floating point. A satisfiable answer is re-checked by an exact evaluator and becomes 'unknown' if it cannot be confirmed; unsatisfiable answers have no independent proof checker. The solver supports fewer theories than Z3 or cvc5 and makes no claim about speed. Version 0.2.0 is a soundness release: it fixes wrong answers found by differential testing against Z3, cvc5 and Yices (see CHANGELOG). Dual-licensed under MIT OR Apache-2.0 (the licence field above lists MIT; the Apache-2.0 option is described in the repository).",
   "keywords": [
     "SMT solver",
     "satisfiability modulo theories",
@@ -17,6 +17,7 @@
     "deterministic",
     "DPLL(T)",
     "Rust",
-    "WebAssembly"
+    "SMT-LIB",
+    "differential testing"
   ]
 }

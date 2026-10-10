@@ -53,6 +53,10 @@ impl FloatSort {
 }
 
 impl FloatValue {
+    fn sort_bias(&self) -> i64 {
+        self.sort.exponent_bias()
+    }
+
     pub fn from_bits(sort: FloatSort, bits: &BigUint) -> Option<Self> {
         let sign_bit = bit_at(bits, (sort.exponent_bits + sort.fraction_bits()) as usize);
         let exponent = extract_u64(
@@ -89,7 +93,21 @@ impl FloatValue {
             }
             _ => {
                 let sum = self.exact_rational()? + other.exact_rational()?;
-                class_from_rounded_bits(self.sort, &sum, mode)
+                if sum.is_zero() {
+                    // IEEE 754-2019 6.3: x + x with both zeros of one sign keeps that sign; every
+                    // other exactly-zero sum (opposite zeros, or x + (-x)) is +0, except under
+                    // roundTowardNegative where it is -0.
+                    let (a, b) = (&self.class, &other.class);
+                    let negative =
+                        if is_zero(a) && is_zero(b) && sign_negative(a) == sign_negative(b) {
+                            sign_negative(a)
+                        } else {
+                            mode == RoundingMode::TowardNegative
+                        };
+                    signed_zero(negative)
+                } else {
+                    class_from_rounded_bits(self.sort, &sum, mode)
+                }
             }
         };
         Some(Self {
@@ -122,7 +140,12 @@ impl FloatValue {
             }
             _ => {
                 let product = self.exact_rational()? * other.exact_rational()?;
-                class_from_rounded_bits(self.sort, &product, mode)
+                if product.is_zero() {
+                    // IEEE 754-2019 6.3: the sign of a zero product is the XOR of the signs.
+                    signed_zero(sign_negative(&self.class) ^ sign_negative(&other.class))
+                } else {
+                    class_from_rounded_bits(self.sort, &product, mode)
+                }
             }
         };
         Some(Self {
@@ -164,7 +187,11 @@ impl FloatValue {
             }
             _ => {
                 let quotient = self.exact_rational()? / other.exact_rational()?;
-                class_from_rounded_bits(self.sort, &quotient, mode)
+                if quotient.is_zero() {
+                    signed_zero(sign_negative(&self.class) ^ sign_negative(&other.class))
+                } else {
+                    class_from_rounded_bits(self.sort, &quotient, mode)
+                }
             }
         };
         Some(Self {
@@ -320,6 +347,15 @@ fn encode_value(sort: FloatSort, class: &FloatClass, mode: RoundingMode) -> BigU
         FloatClass::Finite { negative, value } => {
             round_finite_to_bits(sort, *negative, value, mode)
         }
+    }
+}
+
+/// A zero of the given sign.
+fn signed_zero(negative: bool) -> FloatClass {
+    if negative {
+        FloatClass::NegativeZero
+    } else {
+        FloatClass::PositiveZero
     }
 }
 
@@ -651,6 +687,9 @@ fn sign_negative(class: &FloatClass) -> bool {
 pub struct FpSolver {
     assertions: Vec<Expr>,
     conflict: Vec<Expr>,
+    /// Some assertion mentions floating point but could not be evaluated (a variable, an
+    /// operator this evaluator does not implement): satisfiability cannot be claimed.
+    undecided: bool,
 }
 
 impl FpSolver {
@@ -661,6 +700,12 @@ impl FpSolver {
     pub fn reset(&mut self) {
         self.assertions.clear();
         self.conflict.clear();
+        self.undecided = false;
+    }
+
+    /// True when a floating-point assertion could not be evaluated.
+    pub fn is_unknown(&self) -> bool {
+        self.undecided
     }
 
     fn eval_bool(&self, expr: &Expr) -> Option<bool> {
@@ -682,7 +727,47 @@ impl FpSolver {
                 Some(out)
             }
             Expr::Implies(a, b) => Some(!self.eval_bool(a)? || self.eval_bool(b)?),
-            Expr::Eq(a, b) => Some(self.fp_eq(&self.eval_fp(a)?, &self.eval_fp(b)?)),
+            // SMT-LIB `=` on floating point is structural: NaN = NaN, +0 != -0.
+            Expr::Eq(a, b) => Some(self.structural_eq(&self.eval_fp(a)?, &self.eval_fp(b)?)),
+            Expr::App(name, args)
+                if matches!(
+                    name.as_str(),
+                    "fp.eq" | "fp.lt" | "fp.leq" | "fp.gt" | "fp.geq"
+                ) && args.len() == 2 =>
+            {
+                let (a, b) = (self.eval_fp(&args[0])?, self.eval_fp(&args[1])?);
+                if a.sort != b.sort {
+                    return None;
+                }
+                Some(match name.as_str() {
+                    "fp.eq" => self.fp_eq(&a, &b),
+                    "fp.lt" => self.fp_order(&a, &b) == Some(std::cmp::Ordering::Less),
+                    "fp.leq" => matches!(
+                        self.fp_order(&a, &b),
+                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                    ),
+                    "fp.gt" => self.fp_order(&a, &b) == Some(std::cmp::Ordering::Greater),
+                    _ => matches!(
+                        self.fp_order(&a, &b),
+                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                    ),
+                })
+            }
+            Expr::App(name, args) if name == "fp.isNormal" || name == "fp.isSubnormal" => {
+                let v = self.eval_fp(args.first()?)?;
+                let min_normal = pow2_ratio(1 - v.sort_bias());
+                Some(match &v.class {
+                    FloatClass::Finite { value, .. } => {
+                        let normal = value.abs() >= min_normal;
+                        if name == "fp.isNormal" {
+                            normal
+                        } else {
+                            !normal
+                        }
+                    }
+                    _ => false,
+                })
+            }
             Expr::App(name, args) if name == "fp.isNaN" => Some(matches!(
                 self.eval_fp(args.first()?)?.class,
                 FloatClass::QuietNaN { .. }
@@ -758,6 +843,49 @@ impl FpSolver {
                         .unwrap_or(RoundingMode::NearestTiesToEven),
                 )
             }
+            Expr::App(name, args) if name.starts_with("fp.to_fp.") => {
+                let mut it = name["fp.to_fp.".len()..].split('.');
+                let e: u16 = it.next()?.parse().ok()?;
+                let sb: u16 = it.next()?.parse().ok()?;
+                let sort = FloatSort::new(e, sb)?;
+                match args.as_slice() {
+                    // Reinterpretation of an IEEE bit pattern; width must match exactly.
+                    [Expr::BvConst(v, w)] if *w == (e + sb) as usize => {
+                        FloatValue::from_bits(sort, v)
+                    }
+                    // Exact real literal rounded under the given mode.
+                    [rm, real] => {
+                        let mode = self.rounding_mode(std::slice::from_ref(rm))?;
+                        let q = real.as_constant()?;
+                        let bits = round_signed_rational_to_bits(sort, &q, mode);
+                        FloatValue::from_bits(sort, &bits)
+                    }
+                    _ => None,
+                }
+            }
+            Expr::App(name, args) if name == "fp.min" || name == "fp.max" => {
+                let [a, b] = args.as_slice() else { return None };
+                let (a, b) = (self.eval_fp(a)?, self.eval_fp(b)?);
+                same_sort(&a, &b)?;
+                if matches!(a.class, FloatClass::QuietNaN { .. }) {
+                    return Some(b);
+                }
+                if matches!(b.class, FloatClass::QuietNaN { .. }) {
+                    return Some(a);
+                }
+                match self.fp_order(&a, &b)? {
+                    // +0 / -0 is unspecified in SMT-LIB: stay undecided.
+                    std::cmp::Ordering::Equal if !self.structural_eq(&a, &b) => None,
+                    o => {
+                        let a_smaller = o != std::cmp::Ordering::Greater;
+                        Some(if a_smaller == (name == "fp.min") {
+                            a
+                        } else {
+                            b
+                        })
+                    }
+                }
+            }
             Expr::App(name, args) if name == "fp.neg" => Some(self.eval_fp(args.first()?)?.neg()),
             Expr::App(name, args) if name == "fp.abs" => Some(self.eval_fp(args.first()?)?.abs()),
             _ => None,
@@ -769,9 +897,9 @@ impl FpSolver {
             [Expr::BvConst(sign, 1), Expr::BvConst(exp, ebits), Expr::BvConst(sig, sig_bits)] => {
                 let sort =
                     FloatSort::new((*ebits).try_into().ok()?, (*sig_bits + 1).try_into().ok()?)?;
-                let bits = (BigUint::from(*sign) << (*ebits + *sig_bits))
-                    | (BigUint::from(*exp) << *sig_bits)
-                    | BigUint::from(*sig);
+                let bits = (sign.clone() << (*ebits + *sig_bits))
+                    | (exp.clone() << *sig_bits)
+                    | sig.clone();
                 FloatValue::from_bits(sort, &bits)
             }
             _ => None,
@@ -796,6 +924,50 @@ impl FpSolver {
             },
             _ => None,
         })
+    }
+
+    /// SMT-LIB equality: same sort and the same class (all NaNs are one value).
+    fn structural_eq(&self, a: &FloatValue, b: &FloatValue) -> bool {
+        if a.sort != b.sort {
+            return false;
+        }
+        match (&a.class, &b.class) {
+            (FloatClass::QuietNaN { .. }, FloatClass::QuietNaN { .. }) => true,
+            (FloatClass::PositiveZero, FloatClass::PositiveZero)
+            | (FloatClass::NegativeZero, FloatClass::NegativeZero)
+            | (FloatClass::PositiveInfinity, FloatClass::PositiveInfinity)
+            | (FloatClass::NegativeInfinity, FloatClass::NegativeInfinity) => true,
+            (
+                FloatClass::Finite {
+                    negative: an,
+                    value: av,
+                },
+                FloatClass::Finite {
+                    negative: bn,
+                    value: bv,
+                },
+            ) => an == bn && av == bv,
+            _ => false,
+        }
+    }
+
+    /// IEEE ordering (`None` when either side is NaN; the zeros compare equal).
+    fn fp_order(&self, a: &FloatValue, b: &FloatValue) -> Option<std::cmp::Ordering> {
+        fn rank(c: &FloatClass) -> Option<(i8, BigRational)> {
+            match c {
+                FloatClass::QuietNaN { .. } => None,
+                FloatClass::NegativeInfinity => Some((-1, BigRational::zero())),
+                FloatClass::PositiveInfinity => Some((1, BigRational::zero())),
+                FloatClass::PositiveZero | FloatClass::NegativeZero => {
+                    Some((0, BigRational::zero()))
+                }
+                FloatClass::Finite { negative, value } => {
+                    Some((0, if *negative { -value.abs() } else { value.abs() }))
+                }
+            }
+        }
+        let (ra, rb) = (rank(&a.class)?, rank(&b.class)?);
+        Some(ra.0.cmp(&rb.0).then_with(|| ra.1.cmp(&rb.1)))
     }
 
     fn fp_eq(&self, a: &FloatValue, b: &FloatValue) -> bool {
@@ -834,10 +1006,15 @@ impl TheorySolver for FpSolver {
 
     fn check(&mut self) -> bool {
         self.conflict.clear();
+        self.undecided = false;
         for assertion in &self.assertions {
-            if matches!(self.eval_bool(assertion), Some(false)) {
-                self.conflict.push(assertion.clone());
-                return false;
+            match self.eval_bool(assertion) {
+                Some(false) => {
+                    self.conflict.push(assertion.clone());
+                    return false;
+                }
+                Some(true) => {}
+                None => self.undecided = true,
             }
         }
         true
@@ -976,3 +1153,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "fp_z3_oracle_tests.rs"]
+mod z3_oracle_tests;

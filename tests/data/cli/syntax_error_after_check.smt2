@@ -1,0 +1,5 @@
+(declare-const x Int)
+(assert (> x 0))
+(check-sat)
+(assert (foo x))
+(check-sat)

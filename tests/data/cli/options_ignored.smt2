@@ -1,0 +1,8 @@
+(set-option :produce-models true)
+(set-info :status sat)
+(set-logic QF_LIA)
+(declare-const x Int)
+(assert (= x 2))
+(check-sat)
+(get-model)
+(check-sat)

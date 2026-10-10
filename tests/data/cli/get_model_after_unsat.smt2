@@ -1,0 +1,6 @@
+(declare-const x Int)
+(assert (> x 3))
+(assert (< x 3))
+(check-sat)
+(get-model)
+(get-value (x))

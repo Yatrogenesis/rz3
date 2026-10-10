@@ -72,19 +72,40 @@ fn test_nla_basic_conflict() {
 }
 
 #[test]
-fn test_nla_undecided_nonlinear_returns_unknown() {
+fn test_nla_certified_sat_for_satisfiable_product() {
     let mut solver = Rz3Solver::new();
     let x = Expr::Var("x".to_string(), Type::Real);
     let y = Expr::Var("y".to_string(), Type::Real);
     let xy = Expr::Mul(vec![x, y]);
     let zero = Expr::Int(0);
-    let constraint = Expr::Gt(Box::new(xy), Box::new(zero));
+    solver.assert(&Expr::Gt(Box::new(xy), Box::new(zero)));
 
-    solver.assert(&constraint);
+    // `xy > 0` is satisfiable. RZ3-1 forbade claiming Sat without backing; the incremental
+    // linearization now only answers Sat when the model satisfies the assertion with the
+    // exact product (checked by the certifier), and refutes with sound lemmas otherwise.
+    assert!(matches!(solver.check(), SolverResult::Sat));
+}
 
-    // RZ3-1 fix: basic NLA has no decision procedure for `xy > 0` (no
-    // conflict found by the decidable shape-check, and the constraint is
-    // genuinely nonlinear). It must decline to Unknown rather than silently
-    // claim Sat with nothing to back that claim up.
-    assert!(matches!(solver.check(), SolverResult::Unknown));
+#[test]
+fn test_nla_square_is_not_negative() {
+    let mut solver = Rz3Solver::new();
+    let x = Expr::Var("x".to_string(), Type::Real);
+    let xx = Expr::Mul(vec![x.clone(), x]);
+    solver.assert(&Expr::Lt(Box::new(xx), Box::new(Expr::Int(0))));
+    assert!(matches!(solver.check(), SolverResult::Unsat));
+}
+
+#[test]
+fn test_nla_monotonicity_of_squares_refutes_equal_squares() {
+    // x > y > 0 and x*x = y*y is unsat (Z3 agrees); needs x > y >= 0 => x*x > y*y.
+    let mut solver = Rz3Solver::new();
+    let r = |n: &str| Expr::Var(n.to_string(), Type::Real);
+    let (x, y) = (r("x"), r("y"));
+    solver.assert(&Expr::Eq(
+        Box::new(Expr::Mul(vec![x.clone(), x.clone()])),
+        Box::new(Expr::Mul(vec![y.clone(), y.clone()])),
+    ));
+    solver.assert(&Expr::Gt(Box::new(x), Box::new(y.clone())));
+    solver.assert(&Expr::Gt(Box::new(y), Box::new(Expr::Int(0))));
+    assert!(matches!(solver.check(), SolverResult::Unsat));
 }

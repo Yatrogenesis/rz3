@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 64))(declare-const y (_ BitVec 64))
+(assert (bvuaddo x y))
+(assert (bvult x #x0000000000000010))
+(check-sat)(get-model)

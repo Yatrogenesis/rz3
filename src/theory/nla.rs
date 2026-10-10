@@ -238,6 +238,15 @@ impl NlaSolver {
                 p.terms.insert(vec![], BigInt::from(*i));
                 Some(p)
             }
+            Expr::BigRat(_, _) => {
+                let r = expr.as_rational()?;
+                if !r.is_integer() {
+                    return None;
+                }
+                let mut p = MultivariatePolynomial::new();
+                p.terms.insert(vec![], r.to_integer());
+                Some(p)
+            }
             Expr::Var(name, _) => {
                 let idx = self.get_var_idx(name);
                 let mut p = MultivariatePolynomial::new();
@@ -401,9 +410,13 @@ impl TheorySolver for NlaSolver {
         // asserted constraint has genuine nonlinear content, this solver
         // cannot certify satisfiability — decline instead of defaulting to
         // Sat (see the `is_unknown` field doc and RZ3-1).
+        // Also count constraints this solver could not even translate (decimal
+        // constants, negated atoms, ...): dropping them silently would let a
+        // nonlinear contradiction through as Sat.
         let has_undecided_nonlinear = polys_with_op
             .iter()
-            .any(|(p, _)| p.terms.keys().any(|exps| exps.iter().sum::<u32>() >= 2));
+            .any(|(p, _)| p.terms.keys().any(|exps| exps.iter().sum::<u32>() >= 2))
+            || self.constraints.iter().any(|c| c.has_nonlinear_arith());
         if has_undecided_nonlinear {
             self.is_unknown = true;
         }

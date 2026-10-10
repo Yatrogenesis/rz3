@@ -1,0 +1,4 @@
+(set-logic QF_BV)
+(declare-const a (_ BitVec 1))(declare-const b (_ BitVec 2))(declare-const c (_ BitVec 61))
+(assert (= (concat a b c) #x8000000000000007))
+(check-sat)(get-model)

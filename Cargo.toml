@@ -1,9 +1,9 @@
 [package]
 name = "rz3"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 authors = ["Francisco Molina-Burgos <pako.molina@gmail.com>"]
-description = "Deterministic, exact-rational SMT solver in pure Rust (DPLL(T)/CDCL) with an exact linear-arithmetic core. Zero C dependencies, WASM-deployable, reproducible run-to-run."
+description = "Deterministic SMT solver in pure Rust (DPLL(T)/CDCL) over exact rational arithmetic, for a subset of SMT-LIB 2.6. No native dependencies."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Yatrogenesis/rz3"
 readme = "README.md"
@@ -21,6 +21,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 num-rational = "0.4"
-num-bigint = "0.4"
+num-bigint = { version = "0.4", features = ["serde"] }
 num-traits = "0.2"
+num-integer = "0.1"
 sha2 = "0.10"

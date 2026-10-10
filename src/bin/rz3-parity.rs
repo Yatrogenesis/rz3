@@ -142,19 +142,21 @@ fn run_case(path: &Path, z3_bin: &OsString) -> CaseReport {
 }
 
 fn run_rz3_input(input: &str) -> Result<Vec<CheckResult>, String> {
-    let mut parser = Parser::new(input);
+    let mut parser = Parser::strict(input);
     let mut solver = Rz3Solver::new();
     let mut results = Vec::new();
     while let Some(command) = parser.parse_command() {
+        if parser.error().is_some() {
+            break;
+        }
         match command {
             SmtCommand::SetLogic(_) | SmtCommand::SetOption(_, _) | SmtCommand::SetInfo(_, _) => {}
             SmtCommand::DeclareFun(name, params, return_type) => {
                 solver.declare_fun_signature(name, params, return_type);
             }
-            SmtCommand::DefineFun(name, params, return_type, _) => {
-                let param_types = params.into_iter().map(|(_, ty)| ty).collect();
-                solver.declare_fun_signature(name, param_types, return_type);
-            }
+            SmtCommand::DefineFun(_, _, _, _)
+            | SmtCommand::Skipped(_)
+            | SmtCommand::DeclareSort(_) => {}
             SmtCommand::Assert(expr) => solver.assert(&expr),
             SmtCommand::Push(n) => {
                 for _ in 0..n {
@@ -170,6 +172,9 @@ fn run_rz3_input(input: &str) -> Result<Vec<CheckResult>, String> {
             SmtCommand::GetModel | SmtCommand::GetValue(_) => {}
             SmtCommand::Exit => break,
         }
+    }
+    if let Some(err) = parser.error() {
+        return Err(format!("parse error: {err}"));
     }
     if results.is_empty() {
         results.push(convert_result(solver.check()));

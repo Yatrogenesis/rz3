@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 63))
+(assert (bvnego x))
+(assert (distinct x #b100000000000000000000000000000000000000000000000000000000000000))
+(check-sat)

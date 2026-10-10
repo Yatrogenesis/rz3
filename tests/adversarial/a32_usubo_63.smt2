@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(declare-const x (_ BitVec 63))(declare-const y (_ BitVec 63))
+(assert (bvusubo x y))
+(assert (bvuge x y))
+(check-sat)

@@ -1,0 +1,6 @@
+(set-logic QF_NIA)
+(declare-const x Int)(declare-const y Int)
+(push 1)(assert (= (div x y) 3))(assert (= y 0))(check-sat)(get-model)(pop 1)
+(push 1)(assert (= (div x y) 3))(assert (= y 0))(assert (= x 5))(assert (= (div 5 0) 4))(check-sat)(pop 1)
+(push 1)(assert (= (mod x y) x))(assert (distinct y 0))(assert (> x 0))(assert (> y x))(check-sat)(get-model)(pop 1)
+(check-sat)
